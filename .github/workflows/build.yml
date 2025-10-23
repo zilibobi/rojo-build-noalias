@@ -1,0 +1,85 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    name: Build all platforms
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup rokit
+        uses: CompeyDev/setup-rokit@v0.1.2
+
+      - name: Bundle project
+        run: darklua process ./src/init.luau ./rojo-build-noalias.luau
+
+      - name: Extract version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Build for all platforms
+        run: |
+          lune build -t linux-x86_64 -o ./linux-x86_64 ./rojo-build-noalias.luau
+          lune build -t linux-aarch64 -o ./linux-aarch64 ./rojo-build-noalias.luau
+          lune build -t windows-x86_64 -o ./windows-x86_64 ./rojo-build-noalias.luau
+          lune build -t windows-aarch64 -o ./windows-aarch64 ./rojo-build-noalias.luau
+          lune build -t macos-x86_64 -o ./macos-x86_64 ./rojo-build-noalias.luau
+          lune build -t macos-aarch64 -o ./macos-aarch64 ./rojo-build-noalias.luau
+
+      - name: Create zip archives
+        run: |
+          mkdir -p archives
+
+          # Linux x86_64
+          cp ./linux-x86_64 ./rojo-build-noalias
+          zip archives/rbn-${{ steps.version.outputs.VERSION }}-linux-x86_64.zip rojo-build-noalias
+          rm ./rojo-build-noalias
+
+          # Linux aarch64
+          cp ./linux-aarch64 ./rojo-build-noalias
+          zip archives/rbn-${{ steps.version.outputs.VERSION }}-linux-aarch64.zip rojo-build-noalias
+          rm ./rojo-build-noalias
+
+          # Windows x86_64
+          cp ./windows-x86_64.exe ./rojo-build-noalias.exe
+          zip archives/rbn-${{ steps.version.outputs.VERSION }}-windows-x86_64.zip rojo-build-noalias.exe
+          rm ./rojo-build-noalias.exe
+
+          # Windows aarch64
+          cp ./windows-aarch64.exe ./rojo-build-noalias.exe
+          zip archives/rbn-${{ steps.version.outputs.VERSION }}-windows-aarch64.zip rojo-build-noalias.exe
+          rm ./rojo-build-noalias.exe
+
+          # macOS x86_64
+          cp ./macos-x86_64 ./rojo-build-noalias
+          zip archives/rbn-${{ steps.version.outputs.VERSION }}-macos-x86_64.zip rojo-build-noalias
+          rm ./rojo-build-noalias
+
+          # macOS aarch64
+          cp ./macos-aarch64 ./rojo-build-noalias
+          zip archives/rbn-${{ steps.version.outputs.VERSION }}-macos-aarch64.zip rojo-build-noalias
+          rm ./rojo-build-noalias
+
+      - name: List archives
+        run: ls -la archives/
+
+      - name: Release
+        uses: anton-yurchenko/git-release@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHANGELOG_FILE: none
+        with:
+          args: |
+            ./rojo-build-noalias.luau
+            archives/rbn-${{ steps.version.outputs.VERSION }}-linux-x86_64.zip
+            archives/rbn-${{ steps.version.outputs.VERSION }}-linux-aarch64.zip
+            archives/rbn-${{ steps.version.outputs.VERSION }}-windows-x86_64.zip
+            archives/rbn-${{ steps.version.outputs.VERSION }}-windows-aarch64.zip
+            archives/rbn-${{ steps.version.outputs.VERSION }}-macos-x86_64.zip
+            archives/rbn-${{ steps.version.outputs.VERSION }}-macos-aarch64.zip
