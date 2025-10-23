@@ -68,7 +68,19 @@ util.watch(rojo, "stdout", function(line)
     end
 
     local sourcemap = serde.decode("json", res.stdout)
-    local luaurc = serde.decode("json", fs.readFile(".luaurc"))
+
+    -- get luaurc
+    local luaurc = {
+      aliases = {},
+    }
+
+    local ok, err = pcall(function()
+      luaurc = serde.decode("json", fs.readFile(".luaurc"))
+    end)
+
+    if not ok then
+      log.warn(`Could not open .luaurc with error: {string.split(tostring(err), "\n")[1]}`)
+    end
 
     local aliases = luaurc.aliases :: { [string]: string }
 
