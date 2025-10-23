@@ -146,6 +146,14 @@ function util.tryGetFolderPath(child: SourcemapObject, depth: number?): string?
     local path = sub.filePaths[1]
     local segments = string.split(path, "/")
 
+    local last = segments[#segments]
+
+    if string.find(last, "init.luau$") or string.find(last, "init.lua") then
+      table.remove(segments) -- the init file
+      table.remove(segments) -- the folder
+      -- both resolve to a single file so we need to remove this 'file'
+    end
+
     for _ = 1, depth do
       table.remove(segments)
     end
