@@ -12,7 +12,7 @@ This tool replaces aliases with relative string requires based on your project's
 
 ## Showcase
 
-add video here
+https://github.com/user-attachments/assets/b9596c2d-2bd3-4597-b502-367844c2ba66
 
 ## Installation
 
