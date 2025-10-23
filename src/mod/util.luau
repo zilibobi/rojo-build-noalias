@@ -21,7 +21,7 @@ type SourcemapChildHandler = (obj: SourcemapObject, crumbs: { SourcemapObject })
 local util = {}
 
 util.NAME = "rojo-build-noalias"
-util.VERSION = "1.0.0"
+util.VERSION = "1.0.2"
 util.TEMP_OUTPUT_FILENAME = "/tmp/rojo-build-noalias/build.rbxm"
 
 -- ensure temp dir exists
