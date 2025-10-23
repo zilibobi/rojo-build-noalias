@@ -120,7 +120,7 @@ end
 
 function util.tryGetFolderPath(child: SourcemapObject, depth: number?): string?
   local depth = depth or 1
-  local currentDedpth = depth
+  local currentDepth = depth
 
   if not child.children then
     return
@@ -132,7 +132,7 @@ function util.tryGetFolderPath(child: SourcemapObject, depth: number?): string?
     if v.filePaths then
       sub = v
     else
-      sub, depth = util.tryGetFolderPath(v, currentDedpth + 1)
+      sub, depth = util.tryGetFolderPath(v, currentDepth + 1)
     end
 
     if sub then
@@ -140,7 +140,7 @@ function util.tryGetFolderPath(child: SourcemapObject, depth: number?): string?
     end
   end
 
-  if currentDedpth ~= 1 then
+  if currentDepth ~= 1 then
     return sub, depth
   elseif sub then
     local path = sub.filePaths[1]
