@@ -50,7 +50,7 @@ function util.formatHelp(help: string)
   local res = string.format(table.concat(lines, "\n"), util.VERSION)
 
   res = string.gsub(res, "[%u ]+:", stdio.color("yellow") .. "%1" .. stdio.color("reset"))
-  res = string.gsub(res, "<[%u]>", stdio.color("green") .. "%1" .. stdio.color("reset"))
+  res = string.gsub(res, "<%u+>", stdio.color("green") .. "%1" .. stdio.color("reset"))
   res = string.gsub(res, "(%-%a+),", stdio.color("green") .. "%1" .. stdio.color("reset") .. ",")
   res = string.gsub(res, "(%-%-%a+)", stdio.color("green") .. "%1" .. stdio.color("reset"))
 
