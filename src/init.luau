@@ -74,17 +74,39 @@ util.watch(rojo, "stdout", function(line)
       aliases = {},
     }
 
-    local ok, err = pcall(function()
-      luaurc = serde.decode("json", fs.readFile(".luaurc"))
-    end)
+    do
+      local ok, err = pcall(function()
+        luaurc = serde.decode("json", fs.readFile(".luaurc"))
+      end)
 
-    if not ok then
-      log.warn(`Could not open .luaurc with error: {string.split(tostring(err), "\n")[1]}`)
+      if not ok then
+        log.warn(`Could not open .luaurc with error: {string.split(tostring(err), "\n")[1]}`)
+      end
+    end
+
+    -- get project file
+    local project: {
+      tree: {
+        ["$path"]: string,
+      },
+    }?
+
+    do
+      local projectPath = sourcemap.filePaths[1]
+
+      local ok, err = pcall(function()
+        project = serde.decode("json", fs.readFile(projectPath))
+      end)
+
+      if not ok then
+        log.error(`Could not open {projectPath} with error: {string.split(tostring(err), "\n")[1]}`)
+        return
+      end
     end
 
     local aliases = luaurc.aliases :: { [string]: string }
 
-    if not aliases then
+    if not aliases or not project then
       return
     end
 
@@ -120,6 +142,19 @@ util.watch(rojo, "stdout", function(line)
         crumbs = crumbs,
       }
     end)
+
+    -- also add the root path of the project to the filePath map
+    local rootPath = project.tree["$path"]
+
+    if not filePathToNode[rootPath] then
+      local node = {
+        path = rootPath,
+        child = sourcemap,
+        crumbs = { sourcemap },
+      }
+
+      filePathToNode[rootPath] = node
+    end
 
     local aliasToFilePath: { [string]: string } = {}
 
