@@ -117,7 +117,7 @@ function replaceAliases.inFiles(
           table.insert(paths, initLua)
         end
       else
-        log.warn(`  Folder '{child.name}' has no files, skipping`)
+        log.warn(`Folder '{child.name}' has no files, skipping`)
       end
     end
 
