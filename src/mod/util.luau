@@ -21,12 +21,16 @@ type SourcemapChildHandler = (obj: SourcemapObject, crumbs: { SourcemapObject })
 local util = {}
 
 util.NAME = "rojo-build-noalias"
-util.VERSION = "1.0.3"
+util.VERSION = "1.1.0"
 util.TEMP_OUTPUT_FILENAME = "/tmp/rojo-build-noalias/build.rbxm"
+util.TEMP_WORKSPACE_DIR = "/tmp/rojo-build-noalias/workspace"
+util.VERBOSE = false
 
 -- ensure temp dir exists
 local tempDir = string.gsub(util.TEMP_OUTPUT_FILENAME, "/[^/]*$", "")
+
 fs.writeDir(tempDir)
+fs.writeDir(util.TEMP_WORKSPACE_DIR)
 
 function util.formatHelp(help: string)
   help = string.gsub(help, "^%s+\n", "")
@@ -116,6 +120,11 @@ function util.patternSafeString(str: string)
   end
 
   return str
+end
+
+function util.getTimestamp(data: fs.Metadata)
+  local ts = data.modifiedAt
+  return ts and ts.unixTimestamp or 0
 end
 
 function util.tryGetFolderPath(child: SourcemapObject, depth: number?): string?
@@ -255,6 +264,112 @@ function util.forEachInSourcemap(sourcemap: SourcemapObject, handler: SourcemapC
   for _, child in sourcemap.children do
     util.forEachInChild(child, handler, { sourcemap })
   end
+end
+
+function util.copyDir(from: string, to: string, visited: { [string]: boolean }?)
+  local visited = visited or {}
+
+  -- detect circular references
+  if visited[from] then
+    return
+  end
+  visited[from] = true
+
+  fs.writeDir(to)
+
+  -- directories to skip
+  local skipDirs = {
+    [".git"] = true,
+    ["node_modules"] = true,
+    [".luau-lsp"] = true,
+    [".vscode"] = true,
+  }
+
+  for _, entry in fs.readDir(from) do
+    -- skip excluded directories
+    if skipDirs[entry] then
+      continue
+    end
+
+    local fromPath = `{from}/{entry}`
+    local toPath = `{to}/{entry}`
+
+    -- check if it's a symlink by comparing metadata
+    local ok, metadata = pcall(function()
+      return fs.metadata(fromPath)
+    end)
+
+    -- skip if we can't read metadata or if it's a symlink
+    if not ok then
+      continue
+    end
+
+    if fs.isDir(fromPath) then
+      -- recursively copy directory, passing visited table
+      util.copyDir(fromPath, toPath, visited)
+    else
+      -- copy file
+      local ok, err = pcall(function()
+        fs.writeFile(toPath, fs.readFile(fromPath))
+      end)
+
+      if not ok then
+        -- skip files that can't be read
+        continue
+      end
+    end
+  end
+end
+
+function util.findAllLuaurc(rootDir: string, excludeDir: string?): { string }
+  local results = {}
+
+  local function search(dir: string)
+    for _, entry in fs.readDir(dir) do
+      local path = `{dir}/{entry}`
+
+      -- Skip the exclude directory if specified
+      if excludeDir and path == excludeDir then
+        continue
+      end
+
+      if entry == ".luaurc" and fs.isFile(path) then
+        table.insert(results, path)
+      elseif fs.isDir(path) and entry ~= "node_modules" and entry ~= ".git" then
+        search(path)
+      end
+    end
+  end
+
+  search(rootDir)
+  return results
+end
+
+function util.findProjectFileForLuaurc(luaurcPath: string): string?
+  local dir = string.gsub(luaurcPath, "/[^/]*$", "")
+
+  -- look for common Rojo project files
+  local candidates = {
+    `{dir}/default.project.json`,
+    `{dir}/default.project.jsonc`,
+    `{dir}/project.json`,
+    `{dir}/project.jsonc`,
+  }
+
+  for _, candidate in candidates do
+    if fs.isFile(candidate) then
+      return candidate
+    end
+  end
+
+  -- search for any .project.json file
+  for _, entry in fs.readDir(dir) do
+    if string.find(entry, "%.project%.jsonc?$") then
+      return `{dir}/{entry}`
+    end
+  end
+
+  return nil
 end
 
 return util
