@@ -24,6 +24,7 @@ util.NAME = "rojo-build-noalias"
 util.VERSION = "1.1.0"
 util.TEMP_OUTPUT_FILENAME = "/tmp/rojo-build-noalias/build.rbxm"
 util.TEMP_WORKSPACE_DIR = "/tmp/rojo-build-noalias/workspace"
+
 util.VERBOSE = false
 
 -- ensure temp dir exists
@@ -55,8 +56,8 @@ function util.formatHelp(help: string)
 
   res = string.gsub(res, "[%u ]+:", stdio.color("yellow") .. "%1" .. stdio.color("reset"))
   res = string.gsub(res, "<%u+>", stdio.color("green") .. "%1" .. stdio.color("reset"))
-  res = string.gsub(res, "(%-%a+),", stdio.color("green") .. "%1" .. stdio.color("reset") .. ",")
-  res = string.gsub(res, "(%-%-%a+)", stdio.color("green") .. "%1" .. stdio.color("reset"))
+  res = string.gsub(res, " (%-[^%- ]+),", " " .. stdio.color("green") .. "%1" .. stdio.color("reset") .. ",")
+  res = string.gsub(res, "(%-%-[%a%-?]+)", stdio.color("green") .. "%1" .. stdio.color("reset"))
 
   return res
 end
@@ -295,7 +296,7 @@ function util.copyDir(from: string, to: string, visited: { [string]: boolean }?)
     local toPath = `{to}/{entry}`
 
     -- check if it's a symlink by comparing metadata
-    local ok, metadata = pcall(function()
+    local ok = pcall(function()
       return fs.metadata(fromPath)
     end)
 
@@ -309,7 +310,7 @@ function util.copyDir(from: string, to: string, visited: { [string]: boolean }?)
       util.copyDir(fromPath, toPath, visited)
     else
       -- copy file
-      local ok, err = pcall(function()
+      local ok = pcall(function()
         fs.writeFile(toPath, fs.readFile(fromPath))
       end)
 
