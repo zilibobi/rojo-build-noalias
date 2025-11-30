@@ -21,11 +21,12 @@ type SourcemapChildHandler = (obj: SourcemapObject, crumbs: { SourcemapObject })
 local util = {}
 
 util.NAME = "rojo-build-noalias"
-util.VERSION = "1.1.1"
+util.VERSION = "1.1.2"
 util.TEMP_OUTPUT_FILENAME = "/tmp/rojo-build-noalias/build.rbxm"
 util.TEMP_WORKSPACE_DIR = "/tmp/rojo-build-noalias/workspace"
 
 util.VERBOSE = false
+util.PROCESS_ORPHANS = false
 
 -- ensure temp dir exists
 local tempDir = string.gsub(util.TEMP_OUTPUT_FILENAME, "/[^/]*$", "")
@@ -82,10 +83,33 @@ end
 
 function util.processArgs(args: { string }): ({ string }?, string?)
   local output = ""
-  local rojoArgs = table.clone(args)
+  local rojoArgs = {}
+
+  -- Filter out tool-only options
+  local i = 1
+  while i <= #args do
+    local arg = args[i]
+
+    -- Skip --convert-to and its argument
+    if arg == "--convert-to" then
+      i = i + 2 -- skip both --convert-to and the directory argument
+      continue
+    end
+
+    -- Skip --process-orphans
+    if arg == "--process-orphans" then
+      i = i + 1
+      continue
+    end
+
+    -- Add the argument to rojoArgs
+    table.insert(rojoArgs, arg)
+    i = i + 1
+  end
 
   table.insert(rojoArgs, 1, "build")
 
+  -- Process -o/--output flag
   for i, v in rojoArgs do
     if v ~= "-o" and v ~= "--output" then
       continue

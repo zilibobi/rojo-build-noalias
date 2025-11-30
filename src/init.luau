@@ -22,6 +22,7 @@ if #process.args == 0 or table.find(process.args, "-h") or table.find(process.ar
 
     OPTIONS:
             --convert-to <DIR>      Convert project to directory with aliases replaced, then exit (no build)
+            --process-orphans       Treat orphan .luaurc files (without project files) as direct text replacements
 
     ROJO OPTIONS:
             --color <COLOR>         Set color behavior. Valid values are auto, always, and never [default: auto]
@@ -81,6 +82,10 @@ end
 -- Check for verbose mode
 local isVerbose = table.find(process.args, "-v") or table.find(process.args, "--verbose")
 util.VERBOSE = isVerbose
+
+-- Check for process orphans mode
+local processOrphansMode = table.find(process.args, "--process-orphans")
+util.PROCESS_ORPHANS = processOrphansMode
 
 -- get the project directory from args (last positional arg or current dir)
 local projectDir = process.cwd
@@ -204,8 +209,22 @@ else
     local projectPath = util.findProjectFileForLuaurc(luaurcPath)
 
     if not projectPath then
-      if isVerbose then
-        log.warn(`No project file found for {luaurcPath}. Skipping...`)
+      -- Check if process orphans mode is enabled
+      if processOrphansMode then
+        if isVerbose then
+          log.info(`No project file found for {luaurcPath}. Using direct replacement mode...`)
+        end
+
+        local logs = replaceAliases.inFilesDirectly(workspaceDir, luaurcPath)
+        if logs then
+          -- Convert workspace path to original project path for display
+          local displayPath = string.gsub(luaurcPath, "^" .. util.patternSafeString(workspaceDir), projectDir)
+          table.insert(projectLogs, { displayPath .. " (orphan)", logs })
+        end
+      else
+        if isVerbose then
+          log.warn(`No project file found for {luaurcPath}. Skipping...`)
+        end
       end
       continue
     end
@@ -350,6 +369,8 @@ if isWatchMode then
                 local projectPath = util.findProjectFileForLuaurc(dstPath)
                 if projectPath then
                   replaceAliases.inFiles(util.TEMP_WORKSPACE_DIR, dstPath, projectPath, projectDir)
+                elseif processOrphansMode then
+                  replaceAliases.inFilesDirectly(util.TEMP_WORKSPACE_DIR, dstPath)
                 end
               else
                 -- For regular Lua files, we need to re-process just this file
@@ -367,6 +388,8 @@ if isWatchMode then
                   local projectPath = util.findProjectFileForLuaurc(luaurcPath)
                   if projectPath then
                     replaceAliases.inFiles(util.TEMP_WORKSPACE_DIR, luaurcPath, projectPath, projectDir)
+                  elseif processOrphansMode then
+                    replaceAliases.inFilesDirectly(util.TEMP_WORKSPACE_DIR, luaurcPath)
                   end
                 end
               end

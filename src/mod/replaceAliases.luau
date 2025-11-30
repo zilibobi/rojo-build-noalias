@@ -7,6 +7,110 @@ local util = require("./util")
 
 local replaceAliases = {}
 
+function replaceAliases.inFilesDirectly(
+  workspaceDir: string,
+  luaurcPath: string
+): ({ { any } } | boolean)?
+  -- get luaurc
+  local luaurc: {
+    aliases: { [string]: string }?,
+  }
+
+  do
+    local ok, err = pcall(function()
+      luaurc = serde.decode("json", fs.readFile(luaurcPath))
+    end)
+
+    if not ok then
+      log.warn(`Could not open {luaurcPath} with error: {string.split(tostring(err), "\n")[1]}`)
+      return false
+    end
+  end
+
+  local aliases = luaurc.aliases
+
+  if not aliases or next(aliases) == nil then
+    if util.VERBOSE then
+      log.info(`Skipping {luaurcPath} - no aliases defined`)
+    end
+    return false
+  end
+
+  -- Get the directory containing the .luaurc
+  local luaurcDir = string.gsub(luaurcPath, "/[^/]*$", "")
+
+  -- Find all .lua and .luau files in this directory and subdirectories
+  local function findLuaFiles(dir: string): { string }
+    local results = {}
+
+    local function search(currentDir: string)
+      for _, entry in fs.readDir(currentDir) do
+        local path = `{currentDir}/{entry}`
+
+        if fs.isDir(path) and entry ~= "node_modules" and entry ~= ".git" then
+          search(path)
+        elseif string.find(entry, "%.luau?$") then
+          table.insert(results, path)
+        end
+      end
+    end
+
+    search(dir)
+    return results
+  end
+
+  local files = findLuaFiles(luaurcDir)
+  local repLogs = {}
+  local filesProcessed = 0
+
+  for _, filePath in files do
+    local source = fs.readFile(filePath)
+    local modified = false
+    local relativeFilePath = string.gsub(filePath, "^" .. util.patternSafeString(workspaceDir) .. "/", "")
+
+    for alias, replacement in aliases do
+      local patterns = {
+        { true, `require%([\"']@{util.patternSafeString(alias)}[\"']%)`, `require(\"{replacement}\")` },
+        { false, `require%([\"']@{util.patternSafeString(alias)}/([^\"']+)[\"']%)`, `require(\"{replacement}/%1\")` },
+      }
+
+      for _, info in patterns do
+        local nosub = info[1]
+        local pattern = info[2]
+        local replacementPattern = info[3]
+
+        source = string.gsub(source, pattern, function(subpath)
+          modified = true
+
+          local originalReq = nosub and `require(\"@{alias}\")` or `require(\"@{alias}/{subpath}\")`
+          local newReq = nosub and `require(\"{replacement}\")` or `require(\"{replacement}/{subpath}\")`
+
+          table.insert(repLogs, {
+            relativeFilePath,
+            { originalReq, newReq },
+          })
+
+          return newReq
+        end)
+      end
+    end
+
+    if modified then
+      fs.writeFile(filePath, source)
+      filesProcessed = filesProcessed + 1
+    end
+  end
+
+  -- Return the logs for centralized printing
+  if #repLogs > 0 then
+    return repLogs
+  elseif util.VERBOSE then
+    log.info(`Processed {luaurcPath} (orphan mode) - checked {#files} files, no alias requires found`)
+  end
+
+  return nil
+end
+
 function replaceAliases.inFiles(
   workspaceDir: string,
   luaurcPath: string,
