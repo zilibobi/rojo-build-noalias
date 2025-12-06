@@ -7,10 +7,7 @@ local util = require("./util")
 
 local replaceAliases = {}
 
-function replaceAliases.inFilesDirectly(
-  workspaceDir: string,
-  luaurcPath: string
-): ({ { any } } | boolean)?
+function replaceAliases.inFilesDirectly(workspaceDir: string, luaurcPath: string): ({ { any } } | boolean)?
   -- get luaurc
   local luaurc: {
     aliases: { [string]: string }?,
@@ -111,6 +108,51 @@ function replaceAliases.inFilesDirectly(
   return nil
 end
 
+-- Helper function to convert self-nested relative paths to @self paths
+-- For example: "./ForgeVFX/vfx/bezier" -> "@self/vfx/bezier"
+-- This is needed because when Wally downloads a package, it renames the folder
+-- to match the package name (e.g., "forge-vfx"), breaking relative requires
+-- that use the project name (e.g., "ForgeVFX")
+local function convertToSelfPath(relativePath: string, projectRootName: string): string
+  local segments = string.split(relativePath, "/")
+
+  -- Check if path starts with "./<ProjectName>/..." pattern
+  if #segments >= 2 and segments[1] == "." and segments[2] == projectRootName then
+    -- Convert to @self/...
+    local selfSegments = { "@self" }
+    for i = 3, #segments do
+      table.insert(selfSegments, segments[i])
+    end
+    return table.concat(selfSegments, "/")
+  end
+
+  -- Check if path has "../" followed by project root name
+  -- e.g., "../ForgeVFX/foo" or "../../ForgeVFX/foo"
+  for i, segment in segments do
+    if segment == projectRootName and i > 1 then
+      -- Check if all previous segments are ".."
+      local allParentRefs = true
+      for j = 1, i - 1 do
+        if segments[j] ~= ".." then
+          allParentRefs = false
+          break
+        end
+      end
+
+      if allParentRefs then
+        -- Convert to @self/...
+        local selfSegments = { "@self" }
+        for j = i + 1, #segments do
+          table.insert(selfSegments, segments[j])
+        end
+        return table.concat(selfSegments, "/")
+      end
+    end
+  end
+
+  return relativePath
+end
+
 function replaceAliases.inFiles(
   workspaceDir: string,
   luaurcPath: string,
@@ -170,6 +212,9 @@ function replaceAliases.inFiles(
   end
 
   local sourcemap = serde.decode("json", res.stdout)
+
+  -- Get the project root name from the sourcemap (e.g., "ForgeVFX")
+  local projectRootName = sourcemap.name
 
   -- normalize path to be relative to project directory
   local function normalizePath(path: string): string
@@ -407,13 +452,15 @@ function replaceAliases.inFiles(
           -- Use requireContextPath instead of currentFilePath for init files
           local relative = table.concat(util.getRelativePath(requireContextPath, fullTargetPath), "/")
 
-          local rep
-
+          -- Convert self-nested paths to @self (e.g., "./ForgeVFX/foo" -> "@self/foo")
+          -- This is needed because Wally renames packages to match the package name
           if nosub then
-            rep = `require(\"{relative}\")`
+            relative = convertToSelfPath(relative, projectRootName)
           else
-            rep = `require(\"{relative}/{subpath}\")`
+            relative = convertToSelfPath(`{relative}/{subpath}`, projectRootName)
           end
+
+          local rep = `require(\"{relative}\")`
 
           table.insert(repLogs, {
             table.concat(currentFilePath, "/"),
