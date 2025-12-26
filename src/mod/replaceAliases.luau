@@ -399,36 +399,6 @@ function replaceAliases.inFiles(
       table.remove(requireContextPath) -- Remove the module itself to get parent context
     end
 
-    -- Handle @self alias for init.luau files
-    -- @self points to the current module (for init files, this is the parent directory)
-    if isInitFile then
-      -- For init files, @self represents the module itself
-      local selfInstancePath = currentFilePath
-
-      local pattern = `require%([\"']@self/([^\"']+)[\"']%)`
-
-      source = string.gsub(source, pattern, function(subpath)
-        modified = true
-
-        -- Build target path: @self/foo means the 'foo' submodule of the current module
-        local targetPath = table.clone(selfInstancePath)
-        -- Split subpath by "/" and append each part
-        for part in string.gmatch(subpath, "[^/]+") do
-          table.insert(targetPath, part)
-        end
-
-        local relative = table.concat(util.getRelativePath(requireContextPath, targetPath), "/")
-        local rep = `require(\"{relative}\")`
-
-        table.insert(repLogs, {
-          table.concat(currentFilePath, "/"),
-          { `require(\"@self/{subpath}\")`, rep },
-        })
-
-        return rep
-      end)
-    end
-
     for alias, aliasFilePath in aliasToFilePath do
       local targetNode = filePathToNode[aliasFilePath]
       local patterns = {
