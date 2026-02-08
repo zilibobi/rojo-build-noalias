@@ -181,14 +181,16 @@ function util.tryGetFolderPath(child: SourcemapObject, depth: number?): string?
     local segments = string.split(path, "/")
 
     local last = segments[#segments]
+    local isInit = string.find(last, "init.luau$") or string.find(last, "init.lua$")
 
-    if string.find(last, "init.luau$") or string.find(last, "init.lua") then
+    if isInit then
       table.remove(segments) -- the init file
-      table.remove(segments) -- the folder
-      -- both resolve to a single file so we need to remove this 'file'
+      table.remove(segments) -- the folder containing the init file
     end
 
-    for _ = 1, depth do
+    -- For init files, the folder removal above already accounts for one
+    -- depth level, so subtract 1 to avoid over-stripping
+    for _ = 1, if isInit then depth - 1 else depth do
       table.remove(segments)
     end
 
