@@ -1,0 +1,6 @@
+{
+  "aliases": {
+    "self": "./src",
+    "mod": "./src/mod"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "aliases": {
+    "mod": "./src/mod",
+    "pkg": "./pkg",
+    "vendor": "./vendor"
+  }
+}

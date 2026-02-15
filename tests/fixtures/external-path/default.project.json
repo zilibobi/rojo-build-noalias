@@ -1,0 +1,9 @@
+{
+  "name": "ExternalPath",
+  "tree": {
+    "$path": "src",
+    "pkg": {
+      "$path": "pkg"
+    }
+  }
+}

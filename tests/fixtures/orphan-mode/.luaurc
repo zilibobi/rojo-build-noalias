@@ -1,0 +1,6 @@
+{
+  "aliases": {
+    "packages": "./packages",
+    "lib": "./lib"
+  }
+}

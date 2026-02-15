@@ -1,0 +1,1 @@
+return { resolve = function() end }

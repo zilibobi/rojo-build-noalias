@@ -282,6 +282,19 @@ else
   end
 end
 
+-- In convert-to mode, restructure the output so the filesystem matches the
+-- Rojo instance tree. This moves child $path directories that live outside
+-- the root $path into it, so the relative requires computed from the
+-- instance tree resolve correctly on disk.
+if convertMode then
+  for _, luaurcPath in luaurcFiles do
+    local projectPath = util.findProjectFileForLuaurc(luaurcPath)
+    if projectPath then
+      util.flattenTreePaths(workspaceDir, projectPath)
+    end
+  end
+end
+
 -- Exit if in convert mode
 if convertMode then
   -- If we used an intermediate directory, copy to final destination

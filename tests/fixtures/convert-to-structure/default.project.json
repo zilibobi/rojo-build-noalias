@@ -1,0 +1,9 @@
+{
+  "name": "ConvertStructure",
+  "tree": {
+    "$path": "src",
+    "pkg": {
+      "$path": "pkg"
+    }
+  }
+}

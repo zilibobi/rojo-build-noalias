@@ -1,0 +1,9 @@
+{
+  "name": "NestedInsidePath",
+  "tree": {
+    "$path": "src",
+    "lib": {
+      "$path": "src/lib"
+    }
+  }
+}

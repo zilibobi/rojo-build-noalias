@@ -1,0 +1,9 @@
+{
+  "name": "NormalBuild",
+  "tree": {
+    "$path": "src",
+    "pkg": {
+      "$path": "pkg"
+    }
+  }
+}

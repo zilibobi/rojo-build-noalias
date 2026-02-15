@@ -1,0 +1,12 @@
+{
+  "name": "MultiExternalPath",
+  "tree": {
+    "$path": "src",
+    "pkg": {
+      "$path": "pkg"
+    },
+    "vendor": {
+      "$path": "vendor"
+    }
+  }
+}

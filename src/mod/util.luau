@@ -1,5 +1,6 @@
 --!nolint LocalShadow
 local fs = require("@lune/fs")
+local serde = require("@lune/serde")
 local task = require("@lune/task")
 local roblox = require("@lune/roblox")
 local process = require("@lune/process")
@@ -21,7 +22,7 @@ type SourcemapChildHandler = (obj: SourcemapObject, crumbs: { SourcemapObject })
 local util = {}
 
 util.NAME = "rojo-build-noalias"
-util.VERSION = "1.1.5"
+util.VERSION = "1.1.6"
 util.TEMP_OUTPUT_FILENAME = "/tmp/rojo-build-noalias/build.rbxm"
 util.TEMP_WORKSPACE_DIR = "/tmp/rojo-build-noalias/workspace"
 
@@ -397,6 +398,95 @@ function util.findProjectFileForLuaurc(luaurcPath: string): string?
   end
 
   return nil
+end
+
+--[[
+  In convert-to mode, the alias replacer computes relative paths based on the
+  Rojo instance tree. When the root tree node has a $path (e.g. "src") and a
+  child node has its own $path pointing outside that directory (e.g. "pkg"),
+  the instance tree treats it as a child of the root, but on the filesystem
+  they are siblings. This function moves such directories into the root $path
+  directory so the filesystem matches the instance tree, making the computed
+  relative requires correct.
+
+  Example:
+    Before: src/ and pkg/ are siblings, tree = { "$path": "src", "pkg": { "$path": "pkg" } }
+    After:  pkg/ is moved into src/pkg/, tree updated to { "$path": "src", "pkg": { "$path": "src/pkg" } }
+]]
+function util.flattenTreePaths(workspaceDir: string, projectPath: string)
+  local projectSource = fs.readFile(projectPath)
+  local project = serde.decode("json", projectSource)
+
+  local tree = project.tree
+  if not tree then
+    return
+  end
+
+  local rootPath = tree["$path"]
+  if not rootPath then
+    -- Root has no $path (e.g. DataModel projects) — nothing to flatten
+    return
+  end
+
+  -- Normalize: strip trailing slashes
+  rootPath = string.gsub(rootPath, "/+$", "")
+
+  local moved = false
+
+  -- Walk direct children of the tree looking for $path entries
+  for key, child in tree do
+    if string.sub(key, 1, 1) == "$" then
+      continue
+    end
+
+    if type(child) ~= "table" or not child["$path"] then
+      continue
+    end
+
+    local childPath = child["$path"]
+    childPath = string.gsub(childPath, "/+$", "")
+
+    -- Check if childPath is already inside rootPath
+    if string.find(childPath, "^" .. util.patternSafeString(rootPath) .. "/") or childPath == rootPath then
+      continue
+    end
+
+    -- This child's $path is outside the root $path — move it inside
+    local destPath = `{rootPath}/{key}`
+    local absSrc = `{workspaceDir}/{childPath}`
+    local absDest = `{workspaceDir}/{destPath}`
+
+    if not fs.isDir(absSrc) then
+      -- Could be a single file
+      if fs.isFile(absSrc) then
+        -- Ensure parent directory exists
+        local parentDir = string.gsub(absDest, "/[^/]*$", "")
+        if not fs.isDir(parentDir) then
+          fs.writeDir(parentDir)
+        end
+        fs.writeFile(absDest, fs.readFile(absSrc))
+        fs.removeFile(absSrc)
+      end
+    else
+      -- Move directory: copy then remove original
+      if fs.isDir(absDest) then
+        fs.removeDir(absDest)
+      end
+
+      util.copyDir(absSrc, absDest)
+      fs.removeDir(absSrc)
+    end
+
+    -- Update the project file entry
+    child["$path"] = destPath
+    moved = true
+  end
+
+  if moved then
+    -- Write updated project file
+    local encoded = serde.encode("json", project, true)
+    fs.writeFile(projectPath, encoded)
+  end
 end
 
 return util
