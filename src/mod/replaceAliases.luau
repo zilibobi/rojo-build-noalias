@@ -393,8 +393,9 @@ function replaceAliases.inFiles(
     local isInitFile = string.find(filePath, "/init%.luau?$")
     local requireContextPath = currentFilePath
 
-    if isInitFile then
-      -- In Roblox, for init files, requires resolve relative to the parent level
+    if isInitFile and #currentFilePath == 1 then
+      -- Only adjust for root init files, where @self conversion needs the parent context.
+      -- Non-root init files are handled correctly by getRelativePath's built-in -1.
       requireContextPath = table.clone(currentFilePath)
       table.remove(requireContextPath) -- Remove the module itself to get parent context
     end
