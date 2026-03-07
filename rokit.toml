@@ -4,6 +4,6 @@
 # New tools can be added by running `rokit add <tool>` in a terminal.
 
 [tools]
-StyLua = "JohnnyMorganz/StyLua@2.3.0"
+StyLua = "JohnnyMorganz/StyLua@2.3.1"
 lune = "lune-org/lune@0.10.4"
-darklua = "seaofvoices/darklua@0.17.2"
+darklua = "seaofvoices/darklua@0.17.3"
