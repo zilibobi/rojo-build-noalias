@@ -171,6 +171,14 @@ end
 
 local luaurcFiles = util.findAllLuaurc(workspaceDir, excludeDir)
 
+-- Sort deepest-first so inner sub-project aliases are resolved before
+-- the outer project processes the same files with different alias meanings.
+table.sort(luaurcFiles, function(a, b)
+  local aDepth = select(2, string.gsub(a, "/", ""))
+  local bDepth = select(2, string.gsub(b, "/", ""))
+  return aDepth > bDepth
+end)
+
 if #luaurcFiles == 0 then
   if isVerbose then
     log.warn("No .luaurc files found. Running standard Rojo build...")
