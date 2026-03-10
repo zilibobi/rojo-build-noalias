@@ -57,8 +57,8 @@ for i, arg in process.args do
     convertOutputDir = nextArg
     -- Strip leading ./ if present
     convertOutputDir = string.gsub(convertOutputDir, "^%./", "")
-    -- Convert to absolute path if relative
-    if not string.find(convertOutputDir, "^/") then
+    -- Convert to absolute path if relative (handle both Unix / and Windows C:/ paths)
+    if not string.find(convertOutputDir, "^/") and not string.find(convertOutputDir, "^%a:/") then
       convertOutputDir = `{process.cwd}/{convertOutputDir}`
     end
     -- Normalize the path (remove ./ and trailing slashes, collapse multiple slashes)
@@ -99,8 +99,8 @@ if not convertMode and rojoArgs then
       local path = arg
       projectArgIndex = i
 
-      -- convert to absolute path if relative
-      if not string.find(path, "^/") then
+      -- convert to absolute path if relative (handle both Unix / and Windows C:/ paths)
+      if not string.find(path, "^/") and not string.find(path, "^%a:/") then
         path = `{process.cwd}/{path}`
       end
 
@@ -123,7 +123,7 @@ end
 projectDir = string.gsub(projectDir, "/+$", "")
 
 -- check if projectDir is the temp directory or inside it
-if string.find(projectDir, "^/tmp/rojo%-build%-noalias") then
+if string.find(projectDir, "^" .. util.patternSafeString(util.TEMP_WORKSPACE_DIR)) then
   log.error("Cannot run from within the temporary workspace directory. Please run from your actual project directory.")
   process.exit(1)
 end
@@ -157,27 +157,8 @@ if isVerbose then
   end
 end
 
--- use cp command to copy files, excluding certain directories
-local cpResult = process.exec("cp", {
-  "-r",
-  `{projectDir}/.`,
-  workspaceDir,
-})
-
-if not cpResult.ok then
-  log.error(`Failed to copy project to workspace: {cpResult.stderr}`)
-  process.exit(1)
-end
-
--- remove excluded directories from workspace
-local excludeDirs = { ".git", "node_modules", ".luau-lsp", ".vscode" }
-
-for _, dir in excludeDirs do
-  local path = `{workspaceDir}/{dir}`
-  if fs.isDir(path) then
-    fs.removeDir(path)
-  end
-end
+-- copy project to workspace (cross-platform, skips .git/node_modules/etc.)
+util.copyDir(projectDir, workspaceDir)
 
 -- find all .luaurc files in the workspace
 -- Exclude the convert output directory if it's inside the project
@@ -311,17 +292,8 @@ if convertMode then
     -- Create the destination directory
     fs.writeDir(convertOutputDir)
 
-    -- Copy contents from temp workspace to final destination
-    local copyResult = process.exec("cp", {
-      "-r",
-      `{util.TEMP_WORKSPACE_DIR}/.`,
-      convertOutputDir,
-    })
-
-    if not copyResult.ok then
-      log.error(`Failed to copy to final destination: {copyResult.stderr}`)
-      process.exit(1)
-    end
+    -- Copy contents from temp workspace to final destination (cross-platform)
+    util.copyDir(util.TEMP_WORKSPACE_DIR, convertOutputDir)
   end
 
   log.success(`Project converted successfully to {convertOutputDir}`)

@@ -7,7 +7,10 @@ local TESTS_PASSED = 0
 local TESTS_FAILED = 0
 local TESTS_TOTAL = 0
 
-local TEMP_DIR = "/tmp/rbn-tests"
+local tempBase = process.env.TEMP or process.env.TMPDIR or "/tmp"
+tempBase = string.gsub(tempBase, "\\", "/")
+tempBase = string.gsub(tempBase, "/+$", "")
+local TEMP_DIR = tempBase .. "/rbn-tests"
 local TOOL_PATH = `{process.cwd}/src/init.luau`
 local FIXTURES_DIR = `{process.cwd}/tests/fixtures`
 
@@ -21,9 +24,15 @@ local function cleanTemp()
 end
 
 local function copyDir(from: string, to: string)
-  local res = process.exec("cp", { "-r", from, to })
-  if not res.ok then
-    error(`Failed to copy {from} to {to}: {res.stderr}`)
+  fs.writeDir(to)
+  for _, entry in fs.readDir(from) do
+    local fromPath = `{from}/{entry}`
+    local toPath = `{to}/{entry}`
+    if fs.isDir(fromPath) then
+      copyDir(fromPath, toPath)
+    else
+      fs.writeFile(toPath, fs.readFile(fromPath))
+    end
   end
 end
 
@@ -347,7 +356,7 @@ test("normal build mode does not flatten external $path dirs", function()
 
   -- The temp workspace should not have pkg flattened either
   -- (flattenTreePaths only runs in convert mode)
-  local tempWorkspace = "/tmp/rojo-build-noalias/workspace"
+  local tempWorkspace = tempBase .. "/rojo-build-noalias/workspace"
   if dirExists(tempWorkspace) then
     assertEq(dirExists(`{tempWorkspace}/pkg`), true, "pkg/ should exist in temp workspace")
     assertEq(dirExists(`{tempWorkspace}/src/pkg`), false, "pkg should NOT be flattened in temp workspace")

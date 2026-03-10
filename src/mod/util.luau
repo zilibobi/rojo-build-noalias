@@ -23,8 +23,12 @@ local util = {}
 
 util.NAME = "rojo-build-noalias"
 util.VERSION = "1.1.7"
-util.TEMP_OUTPUT_FILENAME = "/tmp/rojo-build-noalias/build.rbxm"
-util.TEMP_WORKSPACE_DIR = "/tmp/rojo-build-noalias/workspace"
+local tempBase = process.env.TEMP or process.env.TMPDIR or "/tmp"
+tempBase = string.gsub(tempBase, "\\", "/")
+tempBase = string.gsub(tempBase, "/+$", "")
+
+util.TEMP_OUTPUT_FILENAME = tempBase .. "/rojo-build-noalias/build.rbxm"
+util.TEMP_WORKSPACE_DIR = tempBase .. "/rojo-build-noalias/workspace"
 
 util.VERBOSE = false
 util.PROCESS_ORPHANS = false
