@@ -28,6 +28,7 @@ if #process.args == 0 or table.find(process.args, "-h") or table.find(process.ar
             --color <COLOR>         Set color behavior. Valid values are auto, always, and never [default: auto]
         -h, --help                  Print help information
         -o, --output <OUTPUT>       Where to output the result
+        -p, --plugin <PLUGIN>       Output the result to the local Roblox Studio plugins folder (not supported on Linux)
         -v, --verbose               Sets verbosity level. Can be specified multiple times
             --watch                 Whether to automatically rebuild when any input files change
     ]]
@@ -37,9 +38,11 @@ if #process.args == 0 or table.find(process.args, "-h") or table.find(process.ar
   process.exit()
 end
 
-if table.find(process.args, "--plugin") then
-  log.error("The '--plugin' option is not currently supported.")
-  process.exit()
+if table.find(process.args, "--plugin") or table.find(process.args, "-p") then
+  if process.os == "linux" then
+    log.error("The '--plugin' option is not supported on Linux.")
+    process.exit(1)
+  end
 end
 
 -- Check for convert mode (process aliases only, don't build)
@@ -90,12 +93,27 @@ util.PROCESS_ORPHANS = processOrphansMode
 -- get the project directory from args (last positional arg or current dir)
 local projectDir = process.cwd
 local projectArgIndex = nil
+local projectFileName = nil
+
+-- flags whose following argument is a value, not the project path
+local valueFlags = {
+  ["-o"] = true,
+  ["--output"] = true,
+  ["-p"] = true,
+  ["--plugin"] = true,
+  ["--color"] = true,
+}
 
 if not convertMode and rojoArgs then
   for i = #rojoArgs, 1, -1 do
     local arg = rojoArgs[i]
-    -- skip flags, "build", and the temp output filename
-    if not string.find(arg, "^%-") and arg ~= "build" and arg ~= util.TEMP_OUTPUT_FILENAME then
+    -- skip flags (and their values), "build", and the temp output filename
+    if
+      not string.find(arg, "^%-")
+      and arg ~= "build"
+      and arg ~= util.TEMP_OUTPUT_FILENAME
+      and not valueFlags[rojoArgs[i - 1]]
+    then
       local path = arg
       projectArgIndex = i
 
@@ -107,6 +125,7 @@ if not convertMode and rojoArgs then
       -- if it's a file (project.json), get the directory
       if fs.isFile(path) then
         projectDir = string.gsub(path, "/[^/]*$", "")
+        projectFileName = string.match(path, "([^/]+)$")
       elseif fs.isDir(path) then
         projectDir = path
       else
@@ -308,9 +327,12 @@ if convertMode then
   process.exit(0)
 end
 
--- update rojoArgs to point to the temp workspace
+-- update rojoArgs to point to the temp workspace, preserving a named
+-- project file (e.g. dev.project.json) if one was passed
 if projectArgIndex then
-  rojoArgs[projectArgIndex] = util.TEMP_WORKSPACE_DIR
+  rojoArgs[projectArgIndex] = if projectFileName
+    then `{util.TEMP_WORKSPACE_DIR}/{projectFileName}`
+    else util.TEMP_WORKSPACE_DIR
 else
   -- no project arg was specified, add the workspace dir
   table.insert(rojoArgs, util.TEMP_WORKSPACE_DIR)
@@ -413,6 +435,10 @@ util.watch(rojo, "stdout", function(line)
 
   if not string.find(line, "Built project to") then
     return
+  end
+
+  if rojoOutput == "" then
+    return -- plugin mode: rojo wrote directly to the plugins folder
   end
 
   -- copy the built file to the final output location

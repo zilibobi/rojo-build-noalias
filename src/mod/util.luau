@@ -22,11 +22,20 @@ type SourcemapChildHandler = (obj: SourcemapObject, crumbs: { SourcemapObject })
 local util = {}
 
 util.NAME = "rojo-build-noalias"
-util.VERSION = "1.1.9"
+util.VERSION = "1.2.0"
 
 local tempBase = process.env.TEMP or process.env.TMPDIR or "/tmp"
 tempBase = string.gsub(tempBase, "\\", "/")
 tempBase = string.gsub(tempBase, "/+$", "")
+
+-- macOS: $TMPDIR lives under /var (or /tmp), which are symlinks into /private.
+-- Rojo's FSEvents watcher reports canonical paths, so watching a non-canonical
+-- root silently drops every change event. Canonicalize so --watch works.
+if process.os == "macos" then
+  if tempBase == "/tmp" or tempBase == "/var" or string.find(tempBase, "^/tmp/") or string.find(tempBase, "^/var/") then
+    tempBase = "/private" .. tempBase
+  end
+end
 
 util.TEMP_OUTPUT_FILENAME = tempBase .. "/rojo-build-noalias/build.rbxm"
 util.TEMP_WORKSPACE_DIR = tempBase .. "/rojo-build-noalias/workspace"

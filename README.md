@@ -30,6 +30,6 @@ rokit add zilibobi/rojo-build-noalias
 ## Limitations
 
 - Doesn't work with `rojo serve`
-- Doesn't support the rojo `--plugin` option
+- The rojo `--plugin` option is not supported on Linux
 - Only works with projects that build to a model
 - Only supports models with 1 root instance
