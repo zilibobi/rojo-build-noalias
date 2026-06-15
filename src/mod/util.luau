@@ -22,7 +22,7 @@ type SourcemapChildHandler = (obj: SourcemapObject, crumbs: { SourcemapObject })
 local util = {}
 
 util.NAME = "rojo-build-noalias"
-util.VERSION = "1.2.0"
+util.VERSION = "1.2.1"
 
 local tempBase = process.env.TEMP or process.env.TMPDIR or "/tmp"
 tempBase = string.gsub(tempBase, "\\", "/")
