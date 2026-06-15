@@ -1,0 +1,6 @@
+{
+  "aliases": {
+    "pkg": "./src/pkg",
+    "lib": "./src/lib"
+  }
+}

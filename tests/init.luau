@@ -85,6 +85,19 @@ local function runConvertWithOrphans(projectDir: string, outputDir: string): (bo
   return res.ok, res.stdout .. res.stderr
 end
 
+local function runConvertWithWaxCompat(projectDir: string, outputDir: string): (boolean, string)
+  local res = process.exec("lune", {
+    "run",
+    TOOL_PATH,
+    "--",
+    "--convert-to",
+    outputDir,
+    "--wax-compat",
+  }, { cwd = projectDir })
+
+  return res.ok, res.stdout .. res.stderr
+end
+
 local function runBuild(projectDir: string, outputPath: string): (boolean, string)
   local res = process.exec("lune", {
     "run",
@@ -157,6 +170,45 @@ test("basic @alias requires are replaced with relative paths", function()
   local helpers = readFile(`{outputDir}/src/mod/helpers.luau`)
   assertContains(helpers, 'require("../utils/config")', "helpers.luau: @utils/config -> ../utils/config")
   assertNotContains(helpers, "@utils/", "helpers.luau should not contain @utils alias")
+end)
+
+test("--wax-compat adds extra `..` to nested init.luau requires", function()
+  cleanTemp()
+  local projectDir = setupFixture("nested-init")
+  local outputDir = `{TEMP_DIR}/nested-init-wax-out`
+
+  local ok, output = runConvertWithWaxCompat(projectDir, outputDir)
+  assertEq(ok, true, `convert should succeed:\n{output}`)
+
+  -- Under wax-compat, nested init.luau gets one extra `..` so wax's
+  -- pre-RFC shim (init script is its own folder for `./` and `../`)
+  -- walks the same number of instance-tree levels as a sibling leaf.
+  local nestedInit = readFile(`{outputDir}/src/lib/Foo/init.luau`)
+  assertContains(nestedInit, 'require("../../pkg/Logger")', "wax-compat nested init: @pkg/Logger -> ../../pkg/Logger")
+  assertNotContains(nestedInit, 'require("../pkg/Logger")', "wax-compat must NOT emit Luau-spec path")
+end)
+
+test("nested init.luau resolves @ aliases per Luau abstract-module-paths spec", function()
+  cleanTemp()
+  local projectDir = setupFixture("nested-init")
+  local outputDir = `{TEMP_DIR}/nested-init-out`
+
+  local ok, output = runConvert(projectDir, outputDir)
+  assertEq(ok, true, `convert should succeed:\n{output}`)
+
+  -- root init still gets @self conversion
+  local rootInit = readFile(`{outputDir}/src/init.luau`)
+  assertContains(rootInit, 'require("@self/lib/Foo")', "root init: @lib/Foo -> @self/lib/Foo")
+  assertContains(rootInit, 'require("@self/pkg/Logger")', "root init: @pkg/Logger -> @self/pkg/Logger")
+
+  -- Per Luau RFC (abstract-module-paths-and-init.luau, Implemented):
+  -- `./X` from foo/init.luau resolves to the OUTER X (sibling of foo), not
+  -- a child of foo. So @pkg/Logger from src/lib/Foo/init.luau is 1 hop:
+  -- Foo's context is `lib`; `..` from there reaches the project root, then
+  -- into pkg/Logger.
+  local nestedInit = readFile(`{outputDir}/src/lib/Foo/init.luau`)
+  assertContains(nestedInit, 'require("../pkg/Logger")', "nested init: @pkg/Logger -> ../pkg/Logger")
+  assertNotContains(nestedInit, 'require("../../pkg/Logger")', "nested init must NOT emit extra-`..` path")
 end)
 
 test("@self alias is resolved correctly", function()

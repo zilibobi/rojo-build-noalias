@@ -37,16 +37,31 @@ if process.os == "macos" then
   end
 end
 
-util.TEMP_OUTPUT_FILENAME = tempBase .. "/rojo-build-noalias/build.rbxm"
-util.TEMP_WORKSPACE_DIR = tempBase .. "/rojo-build-noalias/workspace"
+-- Per-invocation suffix lets concurrent rojo-build-noalias runs use disjoint
+-- workspaces. Without it, two parallel builds would clobber each other's temp
+-- files (workspace copy, sourcemap output, intermediate rbxm).
+local function uniqueSuffix(): string
+  -- /dev/urandom gives real entropy; os.time + math.random alone collide
+  -- when two processes start in the same second with the same VM clock.
+  local ok, res = pcall(process.exec, "od", { "-vAn", "-N6", "-tx1", "/dev/urandom" })
+  if ok and res.ok then
+    return (string.gsub(res.stdout, "[%s%c]", ""))
+  end
+
+  math.randomseed(os.time() * 1000 + math.floor((os.clock() * 1e6) % 1000000))
+  return string.format("%d%06d", os.time(), math.random(0, 999999))
+end
+
+local instanceDir = tempBase .. "/rojo-build-noalias/" .. uniqueSuffix()
+
+util.INSTANCE_DIR = instanceDir
+util.TEMP_OUTPUT_FILENAME = instanceDir .. "/build.rbxm"
+util.TEMP_WORKSPACE_DIR = instanceDir .. "/workspace"
 
 util.VERBOSE = false
 util.PROCESS_ORPHANS = false
 
--- ensure temp dir exists
-local tempDir = string.gsub(util.TEMP_OUTPUT_FILENAME, "/[^/]*$", "")
-
-fs.writeDir(tempDir)
+fs.writeDir(instanceDir)
 fs.writeDir(util.TEMP_WORKSPACE_DIR)
 
 function util.formatHelp(help: string)
@@ -113,6 +128,12 @@ function util.processArgs(args: { string }): ({ string }?, string?)
 
     -- Skip --process-orphans
     if arg == "--process-orphans" then
+      i = i + 1
+      continue
+    end
+
+    -- Skip --wax-compat (tool-only flag, not for rojo)
+    if arg == "--wax-compat" then
       i = i + 1
       continue
     end

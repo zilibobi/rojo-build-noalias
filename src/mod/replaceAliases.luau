@@ -388,16 +388,26 @@ function replaceAliases.inFiles(
     local modified = false
     local currentFilePath = util.getFullChildPath(node.child, node.crumbs)
 
-    -- For init.luau files in Roblox, require resolution is relative to the parent
-    -- because the folder's contents become children of the ModuleScript
-    local isInitFile = string.find(filePath, "/init%.luau?$")
+    -- Luau's require-by-string (RFC: abstract-module-paths-and-init.luau)
+    -- resolves init.luau relative to its PARENT folder, not the init script.
+    -- For the project root init, drop the root so paths come out as
+    -- "./<ProjectName>/..." which convertToSelfPath collapses to "@self/...",
+    -- keeping requires robust against Wally folder renames.
+    --
+    -- Wax's bundle shim still uses pre-RFC semantics (init is its own folder
+    -- for `./` and `../`), so under --wax-compat we add a sentinel for nested
+    -- init.luau so it walks one extra `..`, matching what the shim expects.
     local requireContextPath = currentFilePath
+    local isInitFile = string.find(filePath, "/init%.luau?$")
 
-    if isInitFile and #currentFilePath == 1 then
-      -- Only adjust for root init files, where @self conversion needs the parent context.
-      -- Non-root init files are handled correctly by getRelativePath's built-in -1.
-      requireContextPath = table.clone(currentFilePath)
-      table.remove(requireContextPath) -- Remove the module itself to get parent context
+    if isInitFile then
+      if #currentFilePath == 1 then
+        requireContextPath = table.clone(currentFilePath)
+        table.remove(requireContextPath)
+      elseif util.WAX_COMPAT then
+        requireContextPath = table.clone(currentFilePath)
+        table.insert(requireContextPath, "")
+      end
     end
 
     for alias, aliasFilePath in aliasToFilePath do

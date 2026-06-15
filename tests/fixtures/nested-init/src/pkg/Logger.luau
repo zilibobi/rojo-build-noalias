@@ -1,0 +1,1 @@
+return { log = function() end }

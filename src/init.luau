@@ -23,6 +23,7 @@ if #process.args == 0 or table.find(process.args, "-h") or table.find(process.ar
     OPTIONS:
             --convert-to <DIR>      Convert project to directory with aliases replaced, then exit (no build)
             --process-orphans       Treat orphan .luaurc files (without project files) as direct text replacements
+            --wax-compat            Emit init.luau paths with one extra `..` for wax's pre-RFC bundle shim
 
     ROJO OPTIONS:
             --color <COLOR>         Set color behavior. Valid values are auto, always, and never [default: auto]
@@ -90,6 +91,12 @@ util.VERBOSE = isVerbose
 local processOrphansMode = table.find(process.args, "--process-orphans")
 util.PROCESS_ORPHANS = processOrphansMode
 
+-- Check for wax-compat mode: wax's bundle shim treats init.luau as its own
+-- folder for `./` and `../` resolution (pre-RFC semantics), so init scripts
+-- need one extra `..` to walk up the same number of instance-tree levels as
+-- a sibling leaf script. Default (off) emits Luau-spec paths.
+util.WAX_COMPAT = table.find(process.args, "--wax-compat") ~= nil
+
 -- get the project directory from args (last positional arg or current dir)
 local projectDir = process.cwd
 local projectArgIndex = nil
@@ -122,7 +129,11 @@ if not convertMode and rojoArgs then
         path = `{process.cwd}/{path}`
       end
 
-      -- if it's a file (project.json), get the directory
+      -- if it's a file (project.json), get the directory + remember the
+      -- filename so we can hand the same name to rojo against the workspace
+      -- copy. Without this, custom-named project files (e.g.
+      -- default.minified.project.json) silently fall back to rojo's default
+      -- default.project.json lookup.
       if fs.isFile(path) then
         projectDir = string.gsub(path, "/[^/]*$", "")
         projectFileName = string.match(path, "([^/]+)$")
@@ -324,6 +335,11 @@ if convertMode then
   end
 
   log.success(`Project converted successfully to {convertOutputDir}`)
+
+  if useIntermediateDir and fs.isDir(util.INSTANCE_DIR) then
+    pcall(fs.removeDir, util.INSTANCE_DIR)
+  end
+
   process.exit(0)
 end
 
@@ -451,3 +467,7 @@ util.watch(rojo, "stdout", function(line)
     log.error(`Failed to copy output file: {err}`)
   end
 end)
+
+if not isWatchMode and fs.isDir(util.INSTANCE_DIR) then
+  pcall(fs.removeDir, util.INSTANCE_DIR)
+end
