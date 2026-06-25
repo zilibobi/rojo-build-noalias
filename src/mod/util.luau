@@ -22,7 +22,7 @@ type SourcemapChildHandler = (obj: SourcemapObject, crumbs: { SourcemapObject })
 local util = {}
 
 util.NAME = "rojo-build-noalias"
-util.VERSION = "1.2.1"
+util.VERSION = "1.2.2"
 
 local tempBase = process.env.TEMP or process.env.TMPDIR or "/tmp"
 tempBase = string.gsub(tempBase, "\\", "/")
@@ -408,8 +408,18 @@ function util.findAllLuaurc(rootDir: string, excludeDir: string?): { string }
   return results
 end
 
-function util.findProjectFileForLuaurc(luaurcPath: string): string?
+function util.findProjectFileForLuaurc(luaurcPath: string, preferredName: string?): string?
   local dir = string.gsub(luaurcPath, "/[^/]*$", "")
+
+  -- prefer the project file explicitly passed on the CLI (e.g. dev.project.json),
+  -- so conversion uses ITS sourcemap/globIgnorePaths instead of always defaulting
+  -- to default.project.json when several project files share a directory.
+  if preferredName then
+    local preferred = `{dir}/{preferredName}`
+    if fs.isFile(preferred) then
+      return preferred
+    end
+  end
 
   -- look for common Rojo project files
   local candidates = {

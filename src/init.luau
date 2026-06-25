@@ -147,6 +147,46 @@ if not convertMode and rojoArgs then
       break
     end
   end
+elseif convertMode then
+  -- determine the project file in convert mode too, so conversion uses the
+  -- CLI-specified project's sourcemap/globIgnorePaths rather than defaulting to
+  -- default.project.json.
+  local i = 1
+  while i <= #process.args do
+    local arg = process.args[i]
+
+    if arg == "--convert-to" then
+      i = i + 2
+      continue
+    end
+
+    if valueFlags[arg] then
+      i = i + 2
+      continue
+    end
+
+    if string.find(arg, "^%-") then
+      i = i + 1
+      continue
+    end
+
+    -- first positional argument is the project path
+    local path = arg
+    if not string.find(path, "^/") and not string.find(path, "^%a:/") then
+      path = `{process.cwd}/{path}`
+    end
+
+    if fs.isFile(path) then
+      projectDir = string.gsub(path, "/[^/]*$", "")
+      projectFileName = string.match(path, "([^/]+)$")
+    elseif fs.isDir(path) then
+      projectDir = path
+    else
+      projectDir = path
+    end
+
+    break
+  end
 end
 
 -- normalize path (remove trailing slashes)
@@ -225,7 +265,9 @@ else
 
   -- process each .luaurc file
   for _, luaurcPath in luaurcFiles do
-    local projectPath = util.findProjectFileForLuaurc(luaurcPath)
+    local luaurcDir = string.gsub(luaurcPath, "/[^/]*$", "")
+    local preferred = (projectFileName and luaurcDir == workspaceDir) and projectFileName or nil
+    local projectPath = util.findProjectFileForLuaurc(luaurcPath, preferred)
 
     if not projectPath then
       -- Check if process orphans mode is enabled
@@ -307,7 +349,9 @@ end
 -- instance tree resolve correctly on disk.
 if convertMode then
   for _, luaurcPath in luaurcFiles do
-    local projectPath = util.findProjectFileForLuaurc(luaurcPath)
+    local luaurcDir = string.gsub(luaurcPath, "/[^/]*$", "")
+    local preferred = (projectFileName and luaurcDir == workspaceDir) and projectFileName or nil
+    local projectPath = util.findProjectFileForLuaurc(luaurcPath, preferred)
     if projectPath then
       util.flattenTreePaths(workspaceDir, projectPath)
     end
@@ -397,7 +441,9 @@ if isWatchMode then
 
               -- If it's a .luaurc, we need to re-process all files in that project
               if entry == ".luaurc" then
-                local projectPath = util.findProjectFileForLuaurc(dstPath)
+                local luaurcDir = string.gsub(dstPath, "/[^/]*$", "")
+                local preferred = (projectFileName and luaurcDir == util.TEMP_WORKSPACE_DIR) and projectFileName or nil
+                local projectPath = util.findProjectFileForLuaurc(dstPath, preferred)
                 if projectPath then
                   replaceAliases.inFiles(util.TEMP_WORKSPACE_DIR, dstPath, projectPath, projectDir)
                 elseif processOrphansMode then
@@ -416,7 +462,10 @@ if isWatchMode then
                 end
 
                 if fs.isFile(luaurcPath) then
-                  local projectPath = util.findProjectFileForLuaurc(luaurcPath)
+                  local luaurcRootDir = string.gsub(luaurcPath, "/[^/]*$", "")
+                  local preferred = (projectFileName and luaurcRootDir == util.TEMP_WORKSPACE_DIR) and projectFileName
+                    or nil
+                  local projectPath = util.findProjectFileForLuaurc(luaurcPath, preferred)
                   if projectPath then
                     replaceAliases.inFiles(util.TEMP_WORKSPACE_DIR, luaurcPath, projectPath, projectDir)
                   elseif processOrphansMode then
