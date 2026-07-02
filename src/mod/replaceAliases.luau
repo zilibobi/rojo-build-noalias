@@ -208,6 +208,7 @@ function replaceAliases.inFiles(
 
   if not res.ok then
     log.error(`Rojo sourcemap generation failed for {projectPath} with exit code {res.code}`)
+    log.error(res.stderr)
     return false
   end
 

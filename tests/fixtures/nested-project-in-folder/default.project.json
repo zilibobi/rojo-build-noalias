@@ -1,0 +1,10 @@
+{
+  "name": "NestedProjectInFolder",
+  "tree": {
+    "$path": "src",
+
+    "pkg": {
+      "$path": "pkg"
+    }
+  }
+}

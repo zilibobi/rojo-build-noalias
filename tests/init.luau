@@ -211,6 +211,30 @@ test("nested init.luau resolves @ aliases per Luau abstract-module-paths spec", 
   assertNotContains(nestedInit, 'require("../../pkg/Logger")', "nested init must NOT emit extra-`..` path")
 end)
 
+test("folder alias resolves when a nested project is the folder's first child", function()
+  cleanTemp()
+  local projectDir = setupFixture("nested-project-in-folder")
+  local outputDir = `{TEMP_DIR}/nested-project-in-folder-out`
+
+  local ok, output = runConvert(projectDir, outputDir)
+  assertEq(ok, true, `convert should succeed:\n{output}`)
+
+  -- The pkg folder's first sourcemap child is the nested "encoder" project,
+  -- whose filePaths point inside its own tree (pkg/Encoder/src/init.luau).
+  -- Deriving the folder path from it must account for that extra level,
+  -- otherwise the @pkg alias never resolves and requires pass through raw.
+  assertNotContains(output, "was not found in the sourcemap", "alias 'pkg' should resolve")
+
+  local user = readFile(`{outputDir}/src/mod/user.luau`)
+  assertContains(user, 'require("../pkg/Promise")', "user.luau: @pkg/Promise -> ../pkg/Promise")
+  assertContains(user, 'require("../pkg/Encoder")', "user.luau: @pkg/Encoder -> ../pkg/Encoder")
+  assertNotContains(user, "@pkg/", "user.luau should not contain @pkg alias")
+
+  local init = readFile(`{outputDir}/src/init.luau`)
+  assertContains(init, 'require("@self/pkg/Promise")', "init.luau: @pkg/Promise -> @self/pkg/Promise")
+  assertNotContains(init, "@pkg/", "init.luau should not contain @pkg alias")
+end)
+
 test("@self alias is resolved correctly", function()
   cleanTemp()
   local projectDir = setupFixture("self-alias")
@@ -422,7 +446,7 @@ end)
 print(stdio.color("cyan") .. "\n  Integration" .. stdio.color("reset"))
 
 test("real forge-vfx project converts correctly", function()
-  local forgeDir = "/home/zili/laptop/vfx-forge/pkg/forge-vfx"
+  local forgeDir = "/home/zili/Projects/laptop/vfx-forge/pkg/forge-vfx"
   if not fs.isDir(forgeDir) then
     stdio.write(stdio.color("yellow") .. `       (skipped: {forgeDir} not found)\n` .. stdio.color("reset"))
     return

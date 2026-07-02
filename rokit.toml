@@ -7,3 +7,4 @@
 StyLua = "JohnnyMorganz/StyLua@2.4.0"
 lune = "lune-org/lune@0.10.4"
 darklua = "seaofvoices/darklua@0.18.0"
+rojo = "rojo-rbx/rojo@7.6.1"

@@ -188,7 +188,21 @@ function util.getTimestamp(data: fs.Metadata)
   return ts and ts.unixTimestamp or 0
 end
 
-function util.tryGetFolderPath(child: SourcemapObject, depth: number?): string?
+function util.getProjectJsonPath(node: SourcemapObject): string?
+  if not node.filePaths then
+    return nil
+  end
+
+  for _, filePath in node.filePaths do
+    if string.find(filePath, "%.project%.json$") then
+      return filePath
+    end
+  end
+
+  return nil
+end
+
+function util.tryGetFolderPath(child: SourcemapObject, depth: number?): ((string | SourcemapObject)?, number?, boolean?)
   local depth = depth or 1
   local currentDepth = depth
 
@@ -197,12 +211,27 @@ function util.tryGetFolderPath(child: SourcemapObject, depth: number?): string?
   end
 
   local sub
+  local subIsProject = false
+  local projectFallback
 
   for _, v in child.children do
     if v.filePaths then
-      sub = v
+      -- A nested project's filePaths point inside its own tree (e.g.
+      -- Pkg/src/init.luau), not directly into this folder, so deriving the
+      -- folder path from them over-strips. Prefer a plain file child and
+      -- only fall back to a nested project when the folder holds nothing
+      -- else; its *.project.json entry sits at the project directory root,
+      -- which strips predictably regardless of the project's own layout.
+      if util.getProjectJsonPath(v) then
+        if not projectFallback then
+          projectFallback = v
+        end
+      else
+        sub = v
+      end
     else
-      sub, depth = util.tryGetFolderPath(v, currentDepth + 1)
+      sub, depth, subIsProject = util.tryGetFolderPath(v, currentDepth + 1)
+      subIsProject = subIsProject or false
     end
 
     if sub then
@@ -210,23 +239,31 @@ function util.tryGetFolderPath(child: SourcemapObject, depth: number?): string?
     end
   end
 
+  if not sub and projectFallback then
+    sub = projectFallback
+    subIsProject = true
+    depth = currentDepth
+  end
+
   if currentDepth ~= 1 then
-    return sub, depth
+    return sub, depth, subIsProject
   elseif sub then
-    local path = sub.filePaths[1]
+    local path = if subIsProject then util.getProjectJsonPath(sub) :: string else sub.filePaths[1]
     local segments = string.split(path, "/")
 
     local last = segments[#segments]
-    local isInit = string.find(last, "init.luau$") or string.find(last, "init.lua$")
+    local isInit = not subIsProject and (string.find(last, "init.luau$") or string.find(last, "init.lua$")) ~= nil
 
-    if isInit then
-      table.remove(segments) -- the init file
-      table.remove(segments) -- the folder containing the init file
+    -- A *.project.json strips like an init file: the file itself, then the
+    -- project directory that contains it.
+    if isInit or subIsProject then
+      table.remove(segments) -- the init/project file
+      table.remove(segments) -- the folder containing it
     end
 
-    -- For init files, the folder removal above already accounts for one
-    -- depth level, so subtract 1 to avoid over-stripping
-    for _ = 1, if isInit then depth - 1 else depth do
+    -- For init/project files, the folder removal above already accounts for
+    -- one depth level, so subtract 1 to avoid over-stripping
+    for _ = 1, if isInit or subIsProject then depth - 1 else depth do
       table.remove(segments)
     end
 
