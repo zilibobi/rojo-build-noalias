@@ -1,5 +1,6 @@
 local fs = require("@lune/fs")
 local serde = require("@lune/serde")
+local roblox = require("@lune/roblox")
 local process = require("@lune/process")
 local stdio = require("@lune/stdio")
 
@@ -282,9 +283,11 @@ test("external $path is flattened into root $path", function()
   local init = readFile(`{outputDir}/src/init.luau`)
   assertContains(init, 'require("@self/pkg/Promise")', "init.luau: @pkg/Promise -> @self/pkg/Promise")
 
-  -- project.json should be updated
+  -- project.json should no longer name pkg: the root $path mounts it now, and
+  -- an entry left behind would have Rojo build a second instance named pkg
   local project = serde.decode("json", readFile(`{outputDir}/default.project.json`))
-  assertEq(project.tree.pkg["$path"], "src/pkg", "project.json pkg $path should be src/pkg")
+  assertEq(project.tree.pkg, nil, "project.json should drop the pkg entry once pkg sits inside src")
+  assertEq(project.tree["$path"], "src", "project.json root $path should stay src")
 end)
 
 test("multiple external $path entries are all flattened", function()
@@ -308,10 +311,10 @@ test("multiple external $path entries are all flattened", function()
   assertContains(utils, 'require("../pkg/Promise")', "utils: @pkg/Promise -> ../pkg/Promise")
   assertContains(utils, 'require("../vendor/Lib")', "utils: @vendor/Lib -> ../vendor/Lib")
 
-  -- project.json should be updated for both
+  -- project.json should drop both entries, which the root $path now produces
   local project = serde.decode("json", readFile(`{outputDir}/default.project.json`))
-  assertEq(project.tree.pkg["$path"], "src/pkg", "pkg $path updated")
-  assertEq(project.tree.vendor["$path"], "src/vendor", "vendor $path updated")
+  assertEq(project.tree.pkg, nil, "pkg entry dropped")
+  assertEq(project.tree.vendor, nil, "vendor entry dropped")
 end)
 
 test("child $path already inside root is not moved", function()
@@ -370,6 +373,22 @@ test("--convert-to copies all files and resolves aliases", function()
   -- pkg should be flattened into src
   assertEq(dirExists(`{outputDir}/src/pkg`), true, "pkg should be inside src/")
   assertEq(dirExists(`{outputDir}/pkg`), false, "pkg/ should not exist at root")
+
+  -- and the converted project builds exactly one instance named pkg
+  local modelPath = `{outputDir}/built.rbxm`
+  local res = process.exec("rojo", { "build", outputDir, "-o", modelPath })
+  assertEq(res.ok, true, `rojo build of the converted project should succeed:\n{res.stdout}{res.stderr}`)
+
+  local model = roblox.deserializeModel(fs.readFile(modelPath))
+  assertEq(#model, 1, "one root instance")
+
+  local named = 0
+  for _, child in model[1]:GetChildren() do
+    if child.Name == "pkg" then
+      named += 1
+    end
+  end
+  assertEq(named, 1, "the built model holds one child named pkg, not two")
 end)
 
 -- ============================================================
@@ -465,8 +484,12 @@ test("real forge-vfx project converts correctly", function()
   assertEq(dirExists(`{outputDir}/pkg`), false, "pkg/ should not exist at root")
 
   -- Check specific require resolutions
-  local utility = readFile(`{outputDir}/src/mod/utility.luau`)
-  assertContains(utility, 'require("../pkg/Promise")', "utility.luau: ../pkg/Promise")
+  local effects = readFile(`{outputDir}/src/services/effects.luau`)
+  assertContains(effects, 'require("../pkg/Promise")', "effects.luau: ../pkg/Promise")
+
+  -- the converted project names pkg once, through the root $path alone
+  local project = serde.decode("json", readFile(`{outputDir}/default.project.json`))
+  assertEq(project.tree.pkg, nil, "forge-vfx project drops the pkg entry")
 
   local camshake = readFile(`{outputDir}/src/effects/camera_shake.luau`)
   assertContains(camshake, 'require("../pkg/Shake")', "camera_shake.luau: ../pkg/Shake")

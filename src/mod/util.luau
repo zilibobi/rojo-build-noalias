@@ -22,7 +22,7 @@ type SourcemapChildHandler = (obj: SourcemapObject, crumbs: { SourcemapObject })
 local util = {}
 
 util.NAME = "rojo-build-noalias"
-util.VERSION = "1.2.3"
+util.VERSION = "1.2.4"
 
 local tempBase = process.env.TEMP or process.env.TMPDIR or "/tmp"
 tempBase = string.gsub(tempBase, "\\", "/")
@@ -559,8 +559,30 @@ function util.flattenTreePaths(workspaceDir: string, projectPath: string)
       fs.removeDir(absSrc)
     end
 
-    -- Update the project file entry
-    child["$path"] = destPath
+    -- The root $path now produces this child from the directory itself, so an
+    -- entry that only ever named the path has to go: kept, Rojo would mount
+    -- the same directory twice and build two instances of the name. An entry
+    -- carrying anything else (a class, properties, nested nodes) cannot be
+    -- dropped without losing that, so it stays and the duplicate is warned about
+    local extra = false
+
+    for field in child do
+      if field ~= "$path" then
+        extra = true
+        break
+      end
+    end
+
+    if extra then
+      log.warn(
+        `"{key}" was moved into "{rootPath}" but its project entry carries more than a $path, `
+          .. `so it is kept and Rojo will build two instances named "{key}"`
+      )
+      child["$path"] = destPath
+    else
+      tree[key] = nil
+    end
+
     moved = true
   end
 
