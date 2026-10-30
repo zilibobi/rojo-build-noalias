@@ -78,7 +78,7 @@ Each is either a bug fix or invisible on vfx-forge; each has a test.
 7. Project files are parsed as JSONC (comments, trailing commas), as Rojo parses them. A JSONC project made v1.2.4 log an error and skip that scope. `.luaurc` stays strict JSON, warn-and-skip on a parse error, as in v1.2.4.
 8. Where v1.2.4 depended on Lua table order (alias order, `readDir` order, unstable `table.sort` of scopes and of the replacement log), 2.0 sorts: aliases by name, directory entries by name, scopes by depth descending then path ascending, log rows by original-require length then file then position. No vfx-forge output depends on any of these orders (section 6.3 shows why for aliases).
 9. The workspace is a per-run directory holding only what the build reads (section 6.4), not a full copy of the project directory. `.luaurc` files outside it (worktrees, `dist/staging` when not mounted) are no longer processed; they could not change the model.
-10. The replacement table at startup is printed as before; in watch mode, per-batch replacement rows are printed only with `-v`.
+10. The replacement table at startup and its `INFO Done in <ms>ms` line print only with `-v`, in convert and build mode alike (owner ruling 2026-10-31; v1.2.4 always printed them, thousands of lines on vfx-forge). Warnings print as before. In watch mode, per-batch replacement rows also print only with `-v`. Test: `alias_resolution::replacement_table_prints_only_with_verbose`.
 11. `--watch` together with `--convert-to` prints a `WARN` that watch is ignored (v1.2.4 ignored it silently).
 12. A project `$path` that resolves outside the project directory is an error naming the path. v1.2.4's workspace held only the project directory, so Rojo failed on it there too, less clearly.
 13. Folder derivation recognizes an init file by its exact name (`init.lua`, `init.luau`). v1.2.4 used the unanchored Lua pattern `init.luau$`, whose `.` matches any character, so a folder whose first file child was `reinit.luau` was derived one level too high (`/p/src` instead of `/p/src/lib`). Test: `sourcemap::tests::folder_path_init_match_is_exact`.
@@ -111,7 +111,7 @@ This section is the port's reference. Line numbers are v1.2.4.
 - Relative path (`util.getRelativePath`, `:309-341`): common prefix `c`; ups = `len(from) - c - 1`, floored at 0; zero ups emits `.`, otherwise that many `..`; then the target's remaining names. Subpath appended with `/`.
 - `@self` conversion (`convertToSelfPath`, `replaceAliases.luau:116-154`): `./<Root>/rest` becomes `@self/rest`; `../../<Root>/rest` (only `..` before the root name) becomes `@self/rest`. `<Root>` is the scope sourcemap's root name.
 - Orphan scope: literal, `require("@a")` becomes `require("<luaurc value>")` and `require("@a/x")` becomes `require("<luaurc value>/x")`, with the value exactly as written in the `.luaurc`.
-- Log rows: `<instance path joined by />` (orphans: the workspace-relative file path), original require, new require. Printed at startup under `OK   Processed project: <original project path>` (orphans suffixed ` (orphan)`), padded to common widths, then `INFO Done in <ms>ms`.
+- Log rows: `<instance path joined by />` (orphans: the workspace-relative file path), original require, new require. Printed at startup, with `-v` only (divergence 10), under `OK   Processed project: <original project path>` (orphans suffixed ` (orphan)`), padded to common widths, then `INFO Done in <ms>ms`.
 
 ### 6.4 Convert mode (`init.luau:201-388`, `util.flattenTreePaths:498-594`)
 
@@ -147,11 +147,11 @@ A lib crate (`rojo_build_noalias`, so integration tests can drive the pipeline) 
 | `paths` | lexical normalize, skip names, script and init predicates, `/`-joined display |
 | `luaurc` | strict-JSON alias map |
 | `project` | project lookup, JSONC read, root `$path`, mount closure, flatten |
-| `sourcemap` | run and parse `rojo sourcemap --absolute`, node index, folder derivation |
+| `sourcemap` | parse `rojo sourcemap --absolute` output, node index, folder derivation |
 | `dealias` | matcher, context path, relative path, `@self`, project and orphan rewrite |
 | `scopes` | discovery, ordering, the per-file scope chain |
 | `workspace` | per-run temp dir, lock, stale sweep, mirror, write-if-changed, prune |
-| `rojo` | invoking rojo, forwarding lines, swallowing its marker |
+| `rojo` | invoking rojo (`sourcemap` and `build`), forwarding lines, swallowing its marker |
 | `output` | temp file beside the output, atomic rename, retry on Windows |
 | `report` | the startup replacement table |
 | `convert` | convert mode |
@@ -242,4 +242,4 @@ Not used: `notify-debouncer-full`/`-mini` (7.2), `aho-corasick` directly (above)
 2. Whether `pkg/forge-vfx/rokit.toml` (pins `rojo-build-noalias@1.2.4`) moves to 2.0.0 too. It is a separate repo whose `origin` only the owner pushes.
 3. Plugin mode (`-p`) stays non-atomic because Rojo writes the plugin itself. Making it atomic means locating the plugins folder ourselves (the `roblox_install` crate Rojo uses).
 4. Divergence 1 (exit 1 on a failed build) will make a `build.sh` run stop where it used to continue silently. That is intended; say so if anything relies on the old behavior.
-5. The startup replacement table (thousands of lines on vfx-forge) is kept for familiarity; it could move behind `-v`.
+5. Settled 2026-10-31: the startup replacement table (thousands of lines on vfx-forge) moved behind `-v` (divergence 10).

@@ -77,3 +77,8 @@ pub fn error(msg: &str) {
 pub fn rojo(msg: &str) {
     emit(&line("ROJO", PURPLE, msg));
 }
+
+/// An empty line, as v1.2.4's `print("")`.
+pub fn blank() {
+    emit("\n");
+}

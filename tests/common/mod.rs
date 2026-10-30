@@ -38,3 +38,8 @@ pub fn text(out: &Output) -> String {
         String::from_utf8_lossy(&out.stderr)
     )
 }
+
+/// The file's text, panicking with its path when it cannot be read.
+pub fn read(p: &Path) -> String {
+    std::fs::read_to_string(p).unwrap_or_else(|e| panic!("cannot read {}: {e}", p.display()))
+}

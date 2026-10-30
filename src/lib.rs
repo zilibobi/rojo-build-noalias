@@ -1,7 +1,13 @@
 pub mod cli;
+pub mod convert;
 pub mod dealias;
 pub mod log;
 pub mod luaurc;
 pub mod paths;
+pub mod project;
+pub mod report;
+pub mod rojo;
+pub mod scopes;
 pub mod shutdown;
 pub mod sourcemap;
+pub mod workspace;

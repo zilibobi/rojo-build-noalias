@@ -27,6 +27,10 @@ rokit add zilibobi/rojo-build-noalias
 1. Download the latest build from [releases](https://github.com/zilibobi/rojo-build-noalias/releases/latest)
 2. Add it to your PATH
 
+## Output
+
+Warnings, errors and the final status line always print. The table of replaced requires (one row per rewritten require, grouped by project) and the time it took print only with `-v`.
+
 ## Limitations
 
 - Doesn't work with `rojo serve`
