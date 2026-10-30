@@ -26,14 +26,23 @@ pub fn run(args: &ConvertArgs) -> anyhow::Result<()> {
         );
     }
 
+    // the CLI's check is lexical; a symlinked spelling of DIR must not reach the project either
+    let project_real = dunce::canonicalize(project_dir)
+        .with_context(|| format!("cannot resolve {}", project_dir.display()))?;
+    let out_real = resolve(out_dir)?;
+
+    if project_real.starts_with(&out_real) {
+        anyhow::bail!("refusing to convert into the project directory or one of its parents");
+    }
+
     // DIR inside the project is converted in a workspace first and left out of the copy, so a
     // previous output is never converted into the next one (divergence 4)
-    let inside = out_dir.starts_with(project_dir);
+    let inside = out_real.starts_with(&project_real);
 
-    if out_dir.is_dir() {
-        std::fs::remove_dir_all(out_dir)
+    if out_real.is_dir() {
+        std::fs::remove_dir_all(&out_real)
             .with_context(|| format!("cannot remove {}", out_dir.display()))?;
-    } else if out_dir.exists() {
+    } else if out_real.exists() {
         anyhow::bail!("{} exists and is not a directory", out_dir.display());
     }
 
@@ -42,7 +51,9 @@ pub fn run(args: &ConvertArgs) -> anyhow::Result<()> {
     } else {
         None
     };
-    let work = ws.as_ref().map_or_else(|| out_dir.clone(), Workspace::tree);
+    let work = ws
+        .as_ref()
+        .map_or_else(|| out_real.clone(), Workspace::tree);
 
     if verbose {
         log::info(&format!(
@@ -52,12 +63,12 @@ pub fn run(args: &ConvertArgs) -> anyhow::Result<()> {
         ));
     }
 
-    let exclude = inside.then_some(out_dir.as_path());
-    workspace::copy_tree(project_dir, &work, exclude)?;
+    // DIR as the copy walks it: the project dir as given, then DIR's place inside it
+    let rel = out_real.strip_prefix(&project_real).ok().filter(|_| inside);
+    let exclude = rel.map(|rel| project_dir.join(rel));
+    workspace::copy_tree(project_dir, &work, exclude.as_deref())?;
 
-    let work_exclude = exclude
-        .and_then(|dir| dir.strip_prefix(project_dir).ok())
-        .map(|rel| work.join(rel));
+    let work_exclude = rel.map(|rel| work.join(rel));
     let mut luaurcs = scopes::discover_all(&work, work_exclude.as_deref());
     scopes::order(&mut luaurcs);
 
@@ -90,7 +101,7 @@ pub fn run(args: &ConvertArgs) -> anyhow::Result<()> {
             ));
         }
 
-        workspace::copy_tree(&work, out_dir, None)?;
+        workspace::copy_tree(&work, &out_real, None)?;
     }
 
     log::success(&format!(
@@ -99,6 +110,26 @@ pub fn run(args: &ConvertArgs) -> anyhow::Result<()> {
     ));
 
     Ok(())
+}
+
+/// `path` with symlinks resolved: its nearest existing ancestor canonicalized, the missing
+/// names after it joined back on.
+fn resolve(path: &Path) -> anyhow::Result<PathBuf> {
+    let mut base = path;
+    let mut missing = Vec::new();
+
+    loop {
+        if let Ok(real) = dunce::canonicalize(base) {
+            return Ok(missing.iter().rev().fold(real, |out, name| out.join(name)));
+        }
+
+        let (Some(name), Some(parent)) = (base.file_name(), base.parent()) else {
+            anyhow::bail!("cannot resolve {}", path.display());
+        };
+
+        missing.push(name);
+        base = parent;
+    }
 }
 
 /// Rewrites every covered script under `work` in place through the scope chain and returns the

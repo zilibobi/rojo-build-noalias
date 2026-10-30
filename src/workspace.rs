@@ -88,7 +88,7 @@ fn sweep(temp_root: &Path, min_age: Duration) -> usize {
     removed
 }
 
-/// Old enough and its lock is free. The lock is released again before this returns, since
+/// Old enough, and its lock is free or was never created. The lock is released again before this returns, since
 /// Windows cannot remove a file that is still open.
 fn is_dead(dir: &Path, min_age: Duration) -> bool {
     let Ok(meta) = std::fs::symlink_metadata(dir) else {
@@ -110,11 +110,11 @@ fn is_dead(dir: &Path, min_age: Duration) -> bool {
         return false;
     }
 
-    let Ok(lock) = File::open(dir.join("lock")) else {
-        return false;
-    };
-
-    lock.try_lock().is_ok()
+    // no lock past the age threshold: a run that died between creating its dir and its lock
+    match File::open(dir.join("lock")) {
+        Ok(lock) => lock.try_lock().is_ok(),
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    }
 }
 
 /// Copies `from` into `to`, following symlinks, skipping [`SKIP_NAMES`] at any depth and the
@@ -234,6 +234,30 @@ mod tests {
         assert_eq!(sweep_stale(tmp.path()), 0);
         assert!(fresh.exists());
         assert!(young.exists());
+    }
+
+    #[test]
+    fn sweep_removes_an_old_dir_without_a_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let crashed = fake_run(tmp.path(), "rojo-build-noalias.crashed");
+        std::fs::remove_file(crashed.join("lock")).unwrap();
+
+        assert_eq!(sweep(tmp.path(), Duration::ZERO), 1);
+        assert!(!crashed.exists());
+    }
+
+    #[test]
+    fn copy_tree_fails_on_a_write_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("x.luau"), "x").unwrap();
+        // a directory where the file has to go
+        std::fs::create_dir_all(dst.join("x.luau")).unwrap();
+
+        let err = copy_tree(&src, &dst, None).unwrap_err().to_string();
+        assert!(err.contains("cannot write"), "{err}");
     }
 
     #[cfg(unix)]

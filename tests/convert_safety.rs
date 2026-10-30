@@ -77,3 +77,74 @@ fn watch_with_convert_is_warned_and_ignored() {
     assert!(text(&run).contains("WARN --watch is ignored with --convert-to"));
     assert!(out.join("src/init.luau").is_file());
 }
+
+#[test]
+fn missing_project_dir_is_an_error() {
+    let (_g, p) = fixture("basic-alias");
+    let out = p.join("../out");
+    let run = rbn()
+        .current_dir(&p)
+        .args(["nope", "--convert-to", out.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(run.status.code(), Some(1), "{}", text(&run));
+    assert!(text(&run).contains("does not exist"), "{}", text(&run));
+    assert!(!out.exists());
+}
+
+#[test]
+fn dir_that_is_a_file_is_an_error() {
+    let (_g, p) = fixture("basic-alias");
+    let out = p.join("../out");
+    std::fs::write(&out, "keep").unwrap();
+    let run = rbn()
+        .current_dir(&p)
+        .args(["--convert-to", out.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(run.status.code(), Some(1), "{}", text(&run));
+    assert!(text(&run).contains("is not a directory"), "{}", text(&run));
+    assert_eq!(read(&out), "keep");
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_onto_the_project_is_refused() {
+    let (_g, p) = fixture("basic-alias");
+
+    // lexically outside the project, really the project itself and its parent
+    for (link, target) in [("../link", p.clone()), ("../uplink", p.join(".."))] {
+        std::os::unix::fs::symlink(&target, p.join(link)).unwrap();
+        let run = rbn()
+            .current_dir(&p)
+            .args(["--convert-to", link])
+            .output()
+            .unwrap();
+        assert_eq!(run.status.code(), Some(1), "{}", text(&run));
+        assert!(text(&run).contains("refusing to convert"), "{}", text(&run));
+        assert!(p.join("default.project.json").is_file());
+        assert!(p.join("src/init.luau").is_file());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_into_the_project_is_treated_as_inside() {
+    let (_g, p) = fixture("basic-alias");
+    std::fs::create_dir(p.join("conv")).unwrap();
+    std::os::unix::fs::symlink(p.join("conv"), p.join("../convlink")).unwrap();
+
+    for _ in 0..2 {
+        let run = rbn()
+            .current_dir(&p)
+            .args(["--convert-to", "../convlink"])
+            .output()
+            .unwrap();
+        assert!(run.status.success(), "{}", text(&run));
+    }
+
+    let init = read(&p.join("conv/src/init.luau"));
+    assert!(init.contains(r#"require("@self/mod/helpers")"#), "{init}");
+    assert!(!p.join("conv/conv").exists());
+    assert!(read(&p.join("src/init.luau")).contains(r#"require("@mod/helpers")"#));
+}
