@@ -91,6 +91,13 @@ pub fn run(args: &ConvertArgs) -> anyhow::Result<()> {
         if verbose {
             log::blank();
         }
+
+        // deepest first, so a nested project flattens before an outer one moves its directory
+        for luaurc in &luaurcs {
+            if let Some(project) = project_for(args, &work, luaurc) {
+                project::flatten_tree_paths(&work, &project)?;
+            }
+        }
     }
 
     if ws.is_some() {
@@ -132,6 +139,14 @@ fn resolve(path: &Path) -> anyhow::Result<PathBuf> {
     }
 }
 
+/// The project file of `luaurc`; the CLI's project file name counts only for the `.luaurc` in
+/// the project root.
+fn project_for(args: &ConvertArgs, work: &Path, luaurc: &Path) -> Option<PathBuf> {
+    let dir = luaurc.parent()?;
+    let preferred = args.target.file_name.as_deref().filter(|_| dir == work);
+    project::find_for_luaurc(dir, preferred)
+}
+
 /// Rewrites every covered script under `work` in place through the scope chain and returns the
 /// rows per scope, titled with the original paths.
 fn dealias_tree(
@@ -141,14 +156,7 @@ fn dealias_tree(
     exclude: Option<&Path>,
 ) -> anyhow::Result<Vec<ProjectLog>> {
     let project_dir = &args.target.dir;
-    let preferred = args.target.file_name.as_deref();
-
-    // the CLI's project file name counts only for the .luaurc in the project root
-    let lookup = |luaurc: &Path| {
-        let dir = luaurc.parent()?;
-        let preferred = if dir == work { preferred } else { None };
-        project::find_for_luaurc(dir, preferred)
-    };
+    let lookup = |luaurc: &Path| project_for(args, work, luaurc);
 
     let rojo = Rojo {
         cwd: project_dir.clone(),

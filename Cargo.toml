@@ -29,6 +29,8 @@ walkdir = "2.5"
 
 [dev-dependencies]
 assert_cmd = "2.2"
+rbx_binary = "3.0"
+rbx_dom_weak = "4.2"
 tempfile = "3.27"
 
 [profile.release]

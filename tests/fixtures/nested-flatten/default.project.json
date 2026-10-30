@@ -1,0 +1,9 @@
+{
+  "name": "NestedFlatten",
+  "tree": {
+    "$path": "src",
+    "pkg": {
+      "$path": "pkg"
+    }
+  }
+}
