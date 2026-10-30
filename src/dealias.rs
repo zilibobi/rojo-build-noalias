@@ -17,7 +17,7 @@ pub struct Replacement {
 /// `require("@a")` and `require("@a/sub")`, either quote on either side, no whitespace,
 /// comments and strings included. Group 1 is the alias, group 2 the subpath.
 pub fn matcher<'a>(aliases: impl IntoIterator<Item = &'a str>) -> Option<Regex> {
-    // longest first so an alias that prefixes another never shadows it
+    // longest first: when one alias is another plus `/...` (`a` and `a/b`), the longer one wins
     let mut names: Vec<&str> = aliases.into_iter().collect();
 
     if names.is_empty() {
@@ -378,6 +378,97 @@ mod tests {
         assert_eq!(alias(r#"require("@vfxx")"#), None);
         assert_eq!(alias(r#"require("@vfx/")"#), None);
         assert!(matcher(std::iter::empty::<&str>()).is_none());
+    }
+
+    #[test]
+    fn matcher_prefers_the_longer_alias_containing_a_slash() {
+        // only the alternation order decides these: `a` followed by `/b...` is a match too
+        let m = matcher(["a", "a/b"]).unwrap();
+        let groups = |s: &str| {
+            let c = m.captures(s.as_bytes()).unwrap();
+            let sub = c
+                .get(2)
+                .map(|g| String::from_utf8(g.as_bytes().to_vec()).unwrap());
+            (String::from_utf8(c[1].to_vec()).unwrap(), sub)
+        };
+        assert_eq!(
+            groups(r#"require("@a/b/c")"#),
+            ("a/b".to_string(), Some("c".to_string()))
+        );
+        assert_eq!(groups(r#"require("@a/b")"#), ("a/b".to_string(), None));
+        assert_eq!(
+            groups(r#"require("@a/x")"#),
+            ("a".to_string(), Some("x".to_string()))
+        );
+    }
+
+    #[test]
+    fn project_rewrite_inside_strings_matches_v1() {
+        // expected text is v1.2.4's --convert-to output on the same source
+        let targets = BTreeMap::from([("mod".to_string(), v(&["Str", "mod"]))]);
+        let rules = ProjectRules::new("Str".into(), targets);
+        let src = "local a = 'require(\"@mod/x\")'\nlocal b = [[require(\"@mod/x\")]]\nlocal c = \"require(\\\"@mod/x\\\")\"\n";
+        let (out, rows) = rules.rewrite(src.as_bytes(), &v(&[]), "Str");
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "local a = 'require(\"@self/mod/x\")'\nlocal b = [[require(\"@self/mod/x\")]]\nlocal c = \"require(\\\"@mod/x\\\")\"\n"
+        );
+        assert_eq!(rows.len(), 2);
+
+        let (long, _) = rules.rewrite(
+            b"local b = [[\nrequire(\"@mod/x\")\n]]",
+            &v(&["Str", "My Folder", "w"]),
+            "Str/My Folder/w",
+        );
+        assert_eq!(long, b"local b = [[\nrequire(\"../mod/x\")\n]]");
+    }
+
+    #[test]
+    fn spaces_and_percent_in_subpaths_and_names_match_v1() {
+        // expected text is v1.2.4's --convert-to output on a project with these names
+        let targets = BTreeMap::from([
+            ("mod".to_string(), v(&["Str", "mod"])),
+            ("pc".to_string(), v(&["Str", "100%"])),
+            ("sp".to_string(), v(&["Str", "My Folder"])),
+        ]);
+        let rules = ProjectRules::new("Str".into(), targets);
+
+        let (root, _) = rules.rewrite(
+            b"require(\"@mod/My Folder/y\") require(\"@mod/50%/z\") require(\"@sp/w\") require(\"@pc\")",
+            &v(&[]),
+            "Str",
+        );
+        assert_eq!(
+            String::from_utf8(root).unwrap(),
+            "require(\"@self/mod/My Folder/y\") require(\"@self/mod/50%/z\") require(\"@self/My Folder/w\") require(\"@self/100%\")"
+        );
+
+        let (leaf, _) = rules.rewrite(
+            b"require(\"@pc\")",
+            &v(&["Str", "My Folder", "w"]),
+            "Str/My Folder/w",
+        );
+        assert_eq!(leaf, b"require(\"../100%\")");
+
+        let ctx = context_path(
+            Path::new("/p/src/100%/init.luau"),
+            &v(&["Str", "100%"]),
+            false,
+        );
+        let (init, rows) = rules.rewrite(
+            b"require(\"@sp/w\") require(\"@mod/50%/z\")",
+            &ctx,
+            "Str/100%",
+        );
+        assert_eq!(init, b"require(\"./My Folder/w\") require(\"./mod/50%/z\")");
+        assert_eq!(rows[1].from, "require(\"@mod/50%/z\")");
+
+        let orphan = OrphanRules::new(BTreeMap::from([(
+            "pc".to_string(),
+            "./a b/100%".to_string(),
+        )]));
+        let (out, _) = orphan.rewrite(b"require('@pc/x y%')", "src/m.luau");
+        assert_eq!(out, b"require(\"./a b/100%/x y%\")");
     }
 
     #[test]

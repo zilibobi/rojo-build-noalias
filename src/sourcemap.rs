@@ -1,5 +1,5 @@
 use crate::log;
-use crate::paths::normalize;
+use crate::paths::{self, normalize};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -25,19 +25,6 @@ fn project_json_path(node: &Node) -> Option<&Path> {
         .iter()
         .find(|p| p.to_string_lossy().ends_with(".project.json"))
         .map(PathBuf::as_path)
-}
-
-/// v1's `string.find(last, "init.luau$") or string.find(last, "init.lua$")`: an unanchored Lua
-/// pattern whose `.` matches any byte, so `reinit.luau` counts too. Kept for parity.
-fn v1_init_suffix(name: &str) -> bool {
-    let b = name.as_bytes();
-    let ends = |tail: &[u8]| {
-        b.len() >= tail.len() + 5
-            && b.ends_with(tail)
-            && b[..b.len() - tail.len() - 1].ends_with(b"init")
-    };
-
-    ends(b"luau") || ends(b"lua")
 }
 
 struct Found<'a> {
@@ -109,11 +96,7 @@ pub fn folder_path(node: &Node) -> Option<PathBuf> {
         sub.file_paths.first()?.as_path()
     };
 
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy())
-        .unwrap_or_default();
-    let is_init = !found.is_project && v1_init_suffix(&name);
+    let is_init = !found.is_project && paths::is_init(path);
     let strips_two = is_init || found.is_project;
 
     // v1 crashed here on a nil depth (a script-less folder before the file); Rojo's sourcemap
@@ -306,6 +289,13 @@ mod tests {
             folder_path(&sm.children[0]),
             Some(PathBuf::from("/p/src/mod"))
         );
+    }
+
+    #[test]
+    fn folder_path_init_match_is_exact() {
+        // v1's unanchored `init.luau$` took reinit.luau for an init file and gave /p/src
+        let lib = r#"{"name":"lib","className":"Folder","children":[{"name":"reinit","className":"ModuleScript","filePaths":["/p/src/lib/reinit.luau"]}]}"#;
+        assert_eq!(folder_path(&node(lib)), Some(PathBuf::from("/p/src/lib")));
     }
 
     #[test]
