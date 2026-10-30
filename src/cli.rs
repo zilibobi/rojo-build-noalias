@@ -1,7 +1,8 @@
+use crate::paths::normalize;
 use clap::{ArgAction, Parser, ValueEnum};
 use regex::Regex;
 use std::ffi::OsString;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum ColorChoice {
@@ -111,32 +112,6 @@ struct Raw {
     help: bool,
     #[arg(short = 'V', long = "version")]
     version: bool,
-}
-
-/// Lexical normalization: drops `.` and trailing separators, folds `..` against a preceding name.
-fn normalize(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-
-    for comp in path.components() {
-        match comp {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                let pops = matches!(out.components().next_back(), Some(Component::Normal(_)));
-
-                if pops {
-                    out.pop();
-                } else if !matches!(
-                    out.components().next_back(),
-                    Some(Component::RootDir | Component::Prefix(_))
-                ) {
-                    out.push("..");
-                }
-            }
-            other => out.push(other.as_os_str()),
-        }
-    }
-
-    out
 }
 
 pub fn resolve_target(arg: Option<&Path>, cwd: &Path) -> Target {
