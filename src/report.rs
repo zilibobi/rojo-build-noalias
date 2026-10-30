@@ -1,11 +1,53 @@
 use crate::dealias::Replacement;
 use crate::log;
+use crate::scopes::ScopeSet;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// One scope's rows under its title (the original project path, or `<.luaurc> (orphan)`).
 pub struct ProjectLog {
     pub title: String,
     pub rows: Vec<Replacement>,
+}
+
+/// One log per scope of `set` that made rows, titled with its original path (`original` maps a
+/// path in the tree back to the project). A scope that made none prints v1.2.4's `-v` line with
+/// how many files it checked instead. `rows` and `checked` are indexed like `set.scopes`.
+pub fn logs(
+    set: &ScopeSet,
+    rows: Vec<Vec<Replacement>>,
+    checked: &[usize],
+    original: &dyn Fn(&Path) -> PathBuf,
+) -> Vec<ProjectLog> {
+    let mut logs = Vec::new();
+
+    for ((scope, rows), checked) in set.scopes.iter().zip(rows).zip(checked) {
+        if rows.is_empty() {
+            if log::verbose() > 0 {
+                match &scope.project {
+                    Some(project) => log::info(&format!(
+                        "Processed {} - checked {checked} files, no alias requires found",
+                        project.display()
+                    )),
+                    None => log::info(&format!(
+                        "Processed {} (orphan mode) - checked {checked} files, no alias requires found",
+                        scope.luaurc.display()
+                    )),
+                }
+            }
+
+            continue;
+        }
+
+        let title = match &scope.project {
+            Some(project) => original(project).display().to_string(),
+            None => format!("{} (orphan)", original(&scope.luaurc).display()),
+        };
+
+        logs.push(ProjectLog { title, rows });
+    }
+
+    logs
 }
 
 /// v1.2.4's startup table (`init.luau:301-339`): one `Processed project:` line per log with rows,

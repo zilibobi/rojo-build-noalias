@@ -37,3 +37,4 @@ Warnings, errors and the final status line always print. The table of replaced r
 - The rojo `--plugin` option is not supported on Linux
 - Only works with projects that build to a model
 - Only supports models with 1 root instance
+- Every `$path` in a project Rojo reads must stay inside the project directory

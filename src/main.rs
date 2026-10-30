@@ -1,5 +1,5 @@
 use rojo_build_noalias::cli::{self, CliError, Mode};
-use rojo_build_noalias::{convert, log};
+use rojo_build_noalias::{convert, log, pipeline};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -28,8 +28,19 @@ fn main() -> ExitCode {
         Ok(Mode::Build(args)) => {
             log::init(args.opts.color);
             log::set_verbose(args.opts.verbose);
-            log::error("not implemented yet");
-            ExitCode::from(1)
+
+            if args.watch {
+                log::error("not implemented yet");
+                return ExitCode::from(1);
+            }
+
+            match pipeline::run_once(&args) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    log::error(&format!("{e:#}"));
+                    ExitCode::from(1)
+                }
+            }
         }
         Ok(Mode::Convert(args)) => {
             log::init(args.opts.color);

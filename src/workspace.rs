@@ -1,8 +1,10 @@
-use crate::paths::SKIP_NAMES;
+use crate::paths::{self, SKIP_NAMES};
+use crate::project::{self, Mounts};
 use anyhow::Context;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 const PREFIX: &str = "rojo-build-noalias.";
 
@@ -155,10 +157,163 @@ pub fn copy_tree(from: &Path, to: &Path, exclude: Option<&Path>) -> anyhow::Resu
     Ok(())
 }
 
+/// One mirrored entry's source metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Meta {
+    pub dir: bool,
+    pub len: u64,
+    pub mtime: SystemTime,
+}
+
+/// Every entry [`mirror_mounts`] mirrored, keyed relative to the project directory.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Snapshot {
+    pub entries: BTreeMap<PathBuf, Meta>,
+}
+
+/// Mirrors what the build reads from `src` (the project directory) into `tree`: every root with
+/// [`copy_tree`]'s rules (symlinks followed, skip names below the root, unreadable entries
+/// skipped), the meta file beside each file root, and every project file and `.luaurc`. Scripts
+/// are written raw; the caller rewrites them before any build. Returns what was mirrored and the
+/// raw bytes of every script, both keyed relative to `src`. A missing root mirrors nothing.
+pub fn mirror_mounts(
+    src: &Path,
+    tree: &Path,
+    mounts: &Mounts,
+) -> anyhow::Result<(Snapshot, BTreeMap<PathBuf, Vec<u8>>)> {
+    std::fs::create_dir_all(tree).with_context(|| format!("cannot create {}", tree.display()))?;
+
+    let mut mirror = Mirror {
+        src,
+        tree,
+        snapshot: Snapshot::default(),
+        raw: BTreeMap::new(),
+    };
+
+    for root in &mounts.roots {
+        // a root inside another one is copied with it
+        if mounts
+            .roots
+            .iter()
+            .any(|o| o != root && root.starts_with(o))
+        {
+            continue;
+        }
+
+        mirror.path(root)?;
+
+        if src.join(root).is_file() {
+            mirror.path(&project::meta_of(root))?;
+        }
+    }
+
+    let singles: BTreeSet<&PathBuf> = mounts.projects.iter().chain(&mounts.luaurcs).collect();
+
+    for file in singles {
+        if !mirror.snapshot.entries.contains_key(file) {
+            mirror.path(file)?;
+        }
+    }
+
+    Ok((mirror.snapshot, mirror.raw))
+}
+
+struct Mirror<'a> {
+    src: &'a Path,
+    tree: &'a Path,
+    snapshot: Snapshot,
+    raw: BTreeMap<PathBuf, Vec<u8>>,
+}
+
+impl Mirror<'_> {
+    fn path(&mut self, rel: &Path) -> anyhow::Result<()> {
+        let from = self.src.join(rel);
+
+        let walk = walkdir::WalkDir::new(&from)
+            .follow_links(true)
+            .sort_by_file_name()
+            .into_iter()
+            .filter_entry(|e| e.depth() == 0 || !SKIP_NAMES.iter().any(|n| e.file_name() == *n));
+
+        // a loop, a missing root or an unreadable entry is an Err here and is skipped
+        for entry in walk.flatten() {
+            let Ok(inner) = entry.path().strip_prefix(&from) else {
+                continue;
+            };
+
+            let rel = if inner.as_os_str().is_empty() {
+                rel.to_path_buf()
+            } else {
+                rel.join(inner)
+            };
+
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+
+            let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            let dest = self.tree.join(&rel);
+
+            if meta.is_dir() {
+                std::fs::create_dir_all(&dest)
+                    .with_context(|| format!("cannot create {}", dest.display()))?;
+                self.snapshot.entries.insert(
+                    rel,
+                    Meta {
+                        dir: true,
+                        len: 0,
+                        mtime,
+                    },
+                );
+                continue;
+            }
+
+            let Ok(bytes) = std::fs::read(entry.path()) else {
+                continue;
+            };
+
+            write_if_changed(&dest, &bytes)?;
+            self.snapshot.entries.insert(
+                rel.clone(),
+                Meta {
+                    dir: false,
+                    len: bytes.len() as u64,
+                    mtime,
+                },
+            );
+
+            if paths::is_script(&rel) {
+                self.raw.insert(rel, bytes);
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Writes `bytes` to `path` unless it already holds exactly them, creating its parents. Returns
+/// whether it wrote.
+pub fn write_if_changed(path: &Path, bytes: &[u8]) -> anyhow::Result<bool> {
+    let same_len =
+        std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() == bytes.len() as u64);
+
+    if same_len && std::fs::read(path).is_ok_and(|old| old == bytes) {
+        return Ok(false);
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+    }
+
+    std::fs::write(path, bytes).with_context(|| format!("cannot write {}", path.display()))?;
+
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::SystemTime;
 
     fn workspaces(root: &Path) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(root)
@@ -317,5 +472,140 @@ mod tests {
         assert_eq!(std::fs::read(dst.join("a/f.luau")).unwrap(), b"f");
         assert_eq!(std::fs::read(dst.join("alias.luau")).unwrap(), b"r");
         assert!(!dst.join("a/loop/a").exists());
+    }
+
+    fn put(path: &Path, text: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    fn keys<V>(map: &BTreeMap<PathBuf, V>) -> Vec<String> {
+        map.keys().map(|k| paths::slash(k)).collect()
+    }
+
+    #[test]
+    fn write_if_changed_creates_parents_and_skips_equal_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("a/b/c.luau");
+
+        assert!(write_if_changed(&path, b"one").unwrap());
+        assert!(!write_if_changed(&path, b"one").unwrap());
+        assert!(write_if_changed(&path, b"two").unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), b"two");
+    }
+
+    #[test]
+    fn mirror_of_normal_build() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/normal-build");
+        let mounts = project::mount_closure(&src, Path::new("default.project.json"), None).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let tree = tmp.path().join("tree");
+
+        let (snap, raw) = mirror_mounts(&src, &tree, &mounts).unwrap();
+
+        assert_eq!(
+            keys(&snap.entries),
+            [
+                ".luaurc",
+                "default.project.json",
+                "pkg",
+                "pkg/Promise.luau",
+                "src",
+                "src/init.luau",
+                "src/mod",
+                "src/mod/helpers.luau",
+            ]
+        );
+        assert_eq!(
+            keys(&raw),
+            ["pkg/Promise.luau", "src/init.luau", "src/mod/helpers.luau"]
+        );
+        assert!(snap.entries[Path::new("src")].dir);
+
+        let init = std::fs::read(src.join("src/init.luau")).unwrap();
+        let meta = &snap.entries[Path::new("src/init.luau")];
+        assert!(!meta.dir);
+        assert_eq!(meta.len, init.len() as u64);
+        assert_eq!(
+            meta.mtime,
+            std::fs::metadata(src.join("src/init.luau"))
+                .unwrap()
+                .modified()
+                .unwrap()
+        );
+        assert_eq!(raw[Path::new("src/init.luau")], init);
+        assert_eq!(std::fs::read(tree.join("src/init.luau")).unwrap(), init);
+        assert!(!tree.join("rokit.toml").exists());
+    }
+
+    #[test]
+    fn mirror_takes_file_roots_with_their_meta_and_skips_below_roots() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("p");
+        let tree = tmp.path().join("tree");
+        put(
+            &src.join("default.project.json"),
+            r#"{"name": "X", "tree": {"$path": "src", "run": {"$path": "lib/run.server.luau"}, "Packages": {"$path": "node_modules/pkgs"}}}"#,
+        );
+        put(&src.join("src/init.luau"), "return 1");
+        put(&src.join("src/.git/HEAD"), "ref");
+        put(&src.join("src/node_modules/x.luau"), "x");
+        put(&src.join("lib/run.server.luau"), "print(1)");
+        put(&src.join("lib/run.meta.json"), "{}");
+        put(&src.join("lib/other.luau"), "nope");
+        put(&src.join("node_modules/pkgs/Thing.luau"), "return 2");
+
+        let mounts = project::mount_closure(&src, Path::new("default.project.json"), None).unwrap();
+        let (snap, raw) = mirror_mounts(&src, &tree, &mounts).unwrap();
+
+        assert_eq!(
+            keys(&snap.entries),
+            [
+                "default.project.json",
+                "lib/run.meta.json",
+                "lib/run.server.luau",
+                "node_modules/pkgs",
+                "node_modules/pkgs/Thing.luau",
+                "src",
+                "src/init.luau",
+            ]
+        );
+        assert_eq!(
+            keys(&raw),
+            [
+                "lib/run.server.luau",
+                "node_modules/pkgs/Thing.luau",
+                "src/init.luau"
+            ]
+        );
+        assert!(tree.join("lib/run.meta.json").is_file());
+        assert!(!tree.join("lib/other.luau").exists());
+        assert!(!tree.join("src/.git").exists());
+        assert!(!tree.join("src/node_modules").exists());
+    }
+
+    #[test]
+    fn mirror_copies_overlapping_roots_once_and_skips_missing_ones() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("p");
+        let tree = tmp.path().join("tree");
+        put(&src.join("pkg/A/x.luau"), "x");
+        put(&src.join("pkg/b.txt"), "b");
+
+        let mounts = Mounts {
+            roots: ["pkg", "pkg/A", "missing"]
+                .iter()
+                .map(PathBuf::from)
+                .collect(),
+            ..Mounts::default()
+        };
+        let (snap, raw) = mirror_mounts(&src, &tree, &mounts).unwrap();
+
+        assert_eq!(
+            keys(&snap.entries),
+            ["pkg", "pkg/A", "pkg/A/x.luau", "pkg/b.txt"]
+        );
+        assert_eq!(keys(&raw), ["pkg/A/x.luau"]);
+        assert!(!tree.join("missing").exists());
     }
 }

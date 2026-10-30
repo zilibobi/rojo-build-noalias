@@ -86,3 +86,61 @@ pub fn rojo_build(cwd: &Path, project: &Path, model: &Path) -> Vec<model::Inst> 
 pub fn json(p: &Path) -> serde_json::Value {
     serde_json::from_str(&read(p)).unwrap_or_else(|e| panic!("cannot parse {}: {e}", p.display()))
 }
+
+/// The temp dir [`build`] gives the binary for the project at `dir`: a `tmp` dir beside it,
+/// inside the fixture's guard, so a sweep never reaches another run's workspace.
+pub fn tmp_of(dir: &Path) -> PathBuf {
+    let tmp = dir.parent().unwrap().join("tmp");
+    std::fs::create_dir_all(&tmp).unwrap();
+    tmp
+}
+
+/// A one-shot build run from inside `dir` with `--color never` and the temp dir set to
+/// [`tmp_of`]`(dir)`.
+pub fn build(dir: &Path, args: &[&str]) -> Output {
+    let tmp = tmp_of(dir);
+
+    rbn()
+        .current_dir(dir)
+        .env("TMPDIR", &tmp)
+        .env("TEMP", &tmp)
+        .env("TMP", &tmp)
+        .args(["--color", "never"])
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+/// The `rojo-build-noalias.*` workspaces in `tmp`, sorted.
+pub fn workspaces_in(tmp: &Path) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = std::fs::read_dir(tmp)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("rojo-build-noalias.")
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// Sets a directory's mtime, which `File::open` cannot do on Windows without backup semantics.
+pub fn set_dir_mtime(dir: &Path, time: std::time::SystemTime) {
+    #[cfg(windows)]
+    let file = {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_WRITE_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS
+        std::fs::OpenOptions::new()
+            .access_mode(0x100)
+            .custom_flags(0x0200_0000)
+            .open(dir)
+            .unwrap()
+    };
+    #[cfg(not(windows))]
+    let file = std::fs::File::open(dir).unwrap();
+
+    file.set_modified(time).unwrap();
+}

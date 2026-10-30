@@ -250,33 +250,5 @@ fn dealias_tree(
         Err(_) => path.to_path_buf(),
     };
 
-    let mut logs = Vec::new();
-
-    for ((scope, rows), checked) in set.scopes.iter().zip(rows).zip(checked) {
-        if rows.is_empty() {
-            if log::verbose() > 0 {
-                match &scope.project {
-                    Some(project) => log::info(&format!(
-                        "Processed {} - checked {checked} files, no alias requires found",
-                        project.display()
-                    )),
-                    None => log::info(&format!(
-                        "Processed {} (orphan mode) - checked {checked} files, no alias requires found",
-                        scope.luaurc.display()
-                    )),
-                }
-            }
-
-            continue;
-        }
-
-        let title = match &scope.project {
-            Some(project) => original(project).display().to_string(),
-            None => format!("{} (orphan)", original(&scope.luaurc).display()),
-        };
-
-        logs.push(ProjectLog { title, rows });
-    }
-
-    Ok(logs)
+    Ok(report::logs(&set, rows, &checked, &original))
 }
