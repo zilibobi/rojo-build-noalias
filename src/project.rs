@@ -70,19 +70,31 @@ const KIND_SUFFIXES: [&str; 4] = ["server", "client", "plugin", "model"];
 /// resolve against the project file's own directory, and nothing outside `work` is touched.
 /// Returns true when the project file was rewritten.
 pub fn flatten_tree_paths(work: &Path, project_path: &Path) -> anyhow::Result<bool> {
+    Ok(!flatten(work, project_path)?.is_empty())
+}
+
+/// One directory or file [`flatten`] moved, both paths normalized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Move {
+    pub from: PathBuf,
+    pub to: PathBuf,
+}
+
+/// [`flatten_tree_paths`], returning what moved; the project file was rewritten when any did.
+pub fn flatten(work: &Path, project_path: &Path) -> anyhow::Result<Vec<Move>> {
     // a project that does not parse was already reported when its scope was built
     let Ok(mut project) = read(project_path) else {
-        return Ok(false);
+        return Ok(Vec::new());
     };
 
     let Some(root) = root_path(&project) else {
-        return Ok(false);
+        return Ok(Vec::new());
     };
 
     let root = root.trim_end_matches('/').to_string();
 
     if root.is_empty() {
-        return Ok(false);
+        return Ok(Vec::new());
     }
 
     let base = project_path.parent().unwrap_or(Path::new(""));
@@ -91,11 +103,11 @@ pub fn flatten_tree_paths(work: &Path, project_path: &Path) -> anyhow::Result<bo
     let root_abs = paths::normalize(&base.join(&root_rel));
 
     if !root_abs.starts_with(&work) || !root_abs.is_dir() {
-        return Ok(false);
+        return Ok(Vec::new());
     }
 
     let Some(tree) = project.get_mut("tree").and_then(Value::as_object_mut) else {
-        return Ok(false);
+        return Ok(Vec::new());
     };
 
     let keys: Vec<String> = tree
@@ -103,7 +115,7 @@ pub fn flatten_tree_paths(work: &Path, project_path: &Path) -> anyhow::Result<bo
         .filter(|k| !k.starts_with('$'))
         .cloned()
         .collect();
-    let mut moved = false;
+    let mut moved = Vec::new();
 
     for key in keys {
         let Some(child) = tree.get(&key).and_then(Value::as_object) else {
@@ -152,7 +164,8 @@ pub fn flatten_tree_paths(work: &Path, project_path: &Path) -> anyhow::Result<bo
             format!("{key}{}", kind_suffix(&file))
         };
 
-        move_entry(&src, &root_abs.join(&name))?;
+        let to = root_abs.join(&name);
+        move_entry(&src, &to)?;
 
         if !is_dir {
             move_meta(&src, &root_abs, &key)?;
@@ -176,10 +189,10 @@ pub fn flatten_tree_paths(work: &Path, project_path: &Path) -> anyhow::Result<bo
             }
         }
 
-        moved = true;
+        moved.push(Move { from: src, to });
     }
 
-    if moved {
+    if !moved.is_empty() {
         // pretty JSON without a trailing newline, as v1.2.4's serde.encode wrote it
         let text = serde_json::to_string_pretty(&project)?;
         std::fs::write(project_path, text)
@@ -187,6 +200,34 @@ pub fn flatten_tree_paths(work: &Path, project_path: &Path) -> anyhow::Result<bo
     }
 
     Ok(moved)
+}
+
+/// Every `$path` in the project's tree at any depth, the root's included, resolved against the
+/// project file's directory and normalized. Empty when the project does not parse.
+pub fn mounts(project_path: &Path) -> Vec<PathBuf> {
+    fn walk(node: &Value, base: &Path, out: &mut Vec<PathBuf>) {
+        let Some(node) = node.as_object() else {
+            return;
+        };
+
+        if let Some(path) = node.get("$path").and_then(path_text) {
+            out.push(paths::normalize(&base.join(path)));
+        }
+
+        for (key, child) in node {
+            if !key.starts_with('$') {
+                walk(child, base, out);
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+
+    if let (Ok(project), Some(base)) = (read(project_path), project_path.parent()) {
+        walk(&project["tree"], base, &mut out);
+    }
+
+    out
 }
 
 /// A `$path` value: a string, or `{"optional": <string>}`.

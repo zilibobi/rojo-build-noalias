@@ -72,3 +72,23 @@ fn converted_project_keeps_key_order() {
     let project = json(&out.join("default.project.json"));
     assert_eq!(project["tree"].get("pkg"), None, "{text}");
 }
+
+// serde_json keeps an integer an integer and a float a float (1.0 stays 1.0, which v1.2.4 wrote
+// as 1), but writes a float in its shortest form, so 1.50 and 1e3 do not keep their spelling
+#[test]
+fn converted_project_keeps_integers_and_floats_apart() {
+    let (_g, p) = fixture("external-path");
+    std::fs::write(
+        p.join("default.project.json"),
+        r#"{"name": "ExternalPath", "tree": {"$path": "src", "pkg": {"$path": "pkg"}, "V": {"$className": "Folder", "$attributes": {"A": 1.0, "B": 1.50, "C": 1e3, "D": 5}}}}"#,
+    )
+    .unwrap();
+    let out = p.join("../external-path-out");
+    convert(&p, &out, &[]);
+
+    let text = read(&out.join("default.project.json"));
+    assert!(text.contains(r#""A": 1.0,"#), "{text}");
+    assert!(text.contains(r#""B": 1.5,"#), "{text}");
+    assert!(text.contains(r#""C": 1000.0,"#), "{text}");
+    assert!(text.contains(r#""D": 5"#), "{text}");
+}

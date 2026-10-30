@@ -264,3 +264,93 @@ fn file_child_keeps_its_suffix_and_meta() {
     let shape = |roots: &[common::model::Inst]| roots.iter().map(|r| r.shape()).collect::<Vec<_>>();
     assert_eq!(shape(&before), shape(&after));
 }
+
+// a nested project's "../../b" mount moves b out from under the scopes that still need it;
+// the move is kept, as v1.2.4 kept it, and each loss is warned about
+#[test]
+fn moving_a_dir_another_scope_needs_is_warned() {
+    let (_g, p) = fixture("nested-flatten");
+    write(
+        &p.join("default.project.json"),
+        r#"{"name": "NestedFlatten", "tree": {"$path": "src", "pkg": {"$path": "pkg"}, "b": {"$path": "b"}}}"#,
+    );
+    write(
+        &p.join("pkg/inner/default.project.json"),
+        r#"{"name": "inner", "tree": {"$path": "src", "pkg": {"$path": "pkg"}, "b": {"$path": "../../b"}}}"#,
+    );
+    write(&p.join("b/.luaurc"), r#"{"aliases": {"lib": "./lib"}}"#);
+    write(
+        &p.join("b/default.project.json"),
+        r#"{"name": "b", "tree": {"$path": "src", "lib": {"$path": "lib"}}}"#,
+    );
+    write(&p.join("b/src/init.luau"), "return require(\"@lib/x\")\n");
+    write(&p.join("b/lib/x.luau"), "return 1\n");
+    let out = p.join("../nested-flatten-out");
+    let run = convert(&p, &out, &[]);
+    let log = text(&run);
+
+    assert!(
+        log.contains(r#""b" was moved into "pkg/inner/src/b", so the project of "b/.luaurc" is not flattened"#),
+        "{log}"
+    );
+    assert!(
+        log.contains(
+            r#""b" was moved into "pkg/inner/src/b" but "default.project.json" still mounts it"#
+        ),
+        "{log}"
+    );
+    assert!(
+        out.join("src/pkg/inner/src/b/lib/x.luau").is_file(),
+        "{log}"
+    );
+    assert!(!out.join("b").exists());
+
+    let outer = json(&out.join("default.project.json"));
+    assert_eq!(outer["tree"]["b"]["$path"], "b", "{outer}");
+    assert_eq!(outer["tree"].get("pkg"), None, "{outer}");
+}
+
+#[test]
+fn ordinary_flatten_warns_about_nothing() {
+    let (_g, p) = fixture("nested-flatten");
+    let out = p.join("../nested-flatten-out");
+    let run = convert(&p, &out, &[]);
+    assert!(!text(&run).contains("WARN"), "{}", text(&run));
+}
+
+// DIR inside the project goes through the workspace and is copied back after flattening
+#[test]
+fn flatten_into_an_output_inside_the_project() {
+    let (_g, p) = fixture("nested-flatten");
+    let out = p.join("converted");
+
+    for _ in 0..2 {
+        convert(&p, &out, &[]);
+    }
+
+    assert!(out.join("src/pkg/inner/src/pkg/Promise.luau").is_file());
+    assert!(!out.join("pkg").exists());
+    assert!(
+        !out.join("converted").exists(),
+        "the previous output is not copied in"
+    );
+    assert_eq!(
+        json(&out.join("default.project.json"))["tree"].get("pkg"),
+        None
+    );
+    assert_eq!(
+        json(&out.join("src/pkg/inner/default.project.json"))["tree"].get("pkg"),
+        None
+    );
+
+    // the project itself is untouched
+    assert!(p.join("pkg/inner/pkg/Promise.luau").is_file());
+    assert!(!p.join("src/pkg").exists());
+    assert_eq!(
+        read(&p.join("default.project.json")),
+        read(
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/nested-flatten/default.project.json")
+        )
+    );
+}

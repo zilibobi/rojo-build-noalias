@@ -92,12 +92,7 @@ pub fn run(args: &ConvertArgs) -> anyhow::Result<()> {
             log::blank();
         }
 
-        // deepest first, so a nested project flattens before an outer one moves its directory
-        for luaurc in &luaurcs {
-            if let Some(project) = project_for(args, &work, luaurc) {
-                project::flatten_tree_paths(&work, &project)?;
-            }
-        }
+        flatten_all(args, &work, &luaurcs)?;
     }
 
     if ws.is_some() {
@@ -137,6 +132,55 @@ fn resolve(path: &Path) -> anyhow::Result<PathBuf> {
         missing.push(name);
         base = parent;
     }
+}
+
+/// Flattens every scope's project, deepest first, so a nested project moves its own mounts
+/// before an outer one moves its directory. A move that takes a directory another scope still
+/// needs is kept, as v1.2.4 kept it, and warned about (divergence 15).
+fn flatten_all(args: &ConvertArgs, work: &Path, luaurcs: &[PathBuf]) -> anyhow::Result<()> {
+    let had_project: Vec<bool> = luaurcs
+        .iter()
+        .map(|l| project_for(args, work, l).is_some())
+        .collect();
+    let base = paths::normalize(work);
+    let rel = |p: &Path| paths::slash(p.strip_prefix(&base).unwrap_or(p));
+
+    for (i, luaurc) in luaurcs.iter().enumerate() {
+        let Some(project) = project_for(args, work, luaurc) else {
+            continue;
+        };
+
+        for moved in project::flatten(work, &project)? {
+            let (from, to) = (rel(&moved.from), rel(&moved.to));
+
+            for (j, other) in luaurcs.iter().enumerate() {
+                if j > i && had_project[j] && paths::normalize(other).starts_with(&moved.from) {
+                    log::warn(&format!(
+                        "\"{from}\" was moved into \"{to}\", so the project of \"{}\" is not flattened",
+                        rel(&paths::normalize(other))
+                    ));
+                    continue;
+                }
+
+                let Some(other_project) = project_for(args, work, other) else {
+                    continue;
+                };
+
+                let lost = project::mounts(&other_project)
+                    .iter()
+                    .any(|m| m.starts_with(&moved.from));
+
+                if lost {
+                    log::warn(&format!(
+                        "\"{from}\" was moved into \"{to}\" but \"{}\" still mounts it",
+                        rel(&paths::normalize(&other_project))
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// The project file of `luaurc`; the CLI's project file name counts only for the `.luaurc` in
