@@ -236,6 +236,17 @@ impl Differ<'_> {
         let stat = std::fs::metadata(self.dir.join(rel));
 
         match stat {
+            // another spelling of a case-only rename: this one is gone, and the directory's
+            // listing names the one that is there now
+            Ok(_) if !paths::named_exactly(&self.dir.join(rel)) => {
+                self.remove(rel);
+
+                if let Some(parent) = rel.parent()
+                    && self.known(parent).is_some_and(|m| m.dir)
+                {
+                    self.children(parent);
+                }
+            }
             Ok(meta) if self.wanted(rel) => {
                 let was_dir = self.known(rel).map(|m| m.dir);
                 self.visit(rel, &meta);

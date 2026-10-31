@@ -61,6 +61,26 @@ pub fn resolved_parent(path: &Path) -> PathBuf {
     }
 }
 
+/// Whether the last component of `path` is spelled in its directory exactly as given. A
+/// case-insensitive filesystem (macOS, Windows) opens `Foo.luau` for `foo.luau`, so after a
+/// case-only rename the old spelling still stats; only the directory's listing tells them apart.
+pub fn named_exactly(path: &Path) -> bool {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return true;
+    };
+
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+
+    match std::fs::read_dir(dir) {
+        Ok(entries) => entries.flatten().any(|e| e.file_name() == name),
+        Err(_) => false,
+    }
+}
+
 pub fn is_script(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|e| e.to_str()),

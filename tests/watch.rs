@@ -765,3 +765,26 @@ fn output_spelled_through_a_link_does_not_loop() {
     assert!(!w.has(&["out"]), "the output was built into itself");
     w.assert_matches_fresh_build();
 }
+
+#[test]
+fn case_only_rename_lands_dealiased_under_the_new_name() {
+    // bites on a case-insensitive filesystem (the macOS and Windows CI legs), where the old
+    // spelling still stats after the rename
+    let (_g, p) = fixture("normal-build");
+    let w = started(&p);
+    write(
+        &p.join("src/mod/Thing.luau"),
+        "return require(\"@pkg/Promise\")",
+    );
+    one_build(&w);
+
+    std::fs::rename(p.join("src/mod/Thing.luau"), p.join("src/mod/thing.luau")).unwrap();
+    one_build(&w);
+    assert!(!w.has(&["mod", "Thing"]), "{:#?}", w.model()[0].shape());
+    assert_eq!(
+        source(&w, &["mod", "thing"]),
+        "return require(\"../pkg/Promise\")"
+    );
+    w.assert_no_raw_aliases();
+    w.assert_matches_fresh_build();
+}

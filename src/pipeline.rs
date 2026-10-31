@@ -536,10 +536,20 @@ impl Pipeline {
         let src = self.project_dir.join(rel);
         let dest = self.tree().join(rel);
 
-        let Ok(meta) = std::fs::metadata(&src) else {
+        // on a case-insensitive filesystem the old spelling of a case-only rename still opens
+        let meta = std::fs::metadata(&src)
+            .ok()
+            .filter(|_| paths::named_exactly(&src));
+
+        let Some(meta) = meta else {
             batch.removed += self.unmirror(rel)?;
             return Ok(());
         };
+
+        // the mirror holding this entry under another spelling would keep that name
+        if dest.exists() && !paths::named_exactly(&dest) {
+            remove_entry(&dest)?;
+        }
 
         let mtime = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
 
@@ -593,13 +603,10 @@ impl Pipeline {
     fn unmirror(&mut self, rel: &Path) -> anyhow::Result<usize> {
         let dest = self.tree().join(rel);
 
-        match std::fs::symlink_metadata(&dest) {
-            Ok(m) if m.is_dir() => std::fs::remove_dir_all(&dest),
-            Ok(_) => std::fs::remove_file(&dest),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e),
+        // under another spelling the entry is a live one's on a case-insensitive filesystem
+        if paths::named_exactly(&dest) {
+            remove_entry(&dest)?;
         }
-        .with_context(|| format!("cannot remove {}", dest.display()))?;
 
         let gone: Vec<PathBuf> = self
             .snapshot
@@ -738,6 +745,17 @@ impl Pipeline {
 
         report::print(&logs, elapsed);
     }
+}
+
+/// Removes the file or directory at `path`; a missing one is fine.
+fn remove_entry(path: &Path) -> anyhow::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.is_dir() => std::fs::remove_dir_all(path),
+        Ok(_) => std::fs::remove_file(path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+    .with_context(|| format!("cannot remove {}", path.display()))
 }
 
 /// The file `output` points to when it is a symlink.

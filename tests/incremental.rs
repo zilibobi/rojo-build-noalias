@@ -214,6 +214,53 @@ fn deleted_file_is_pruned() {
     r.fresh();
 }
 
+/// The names in the mirror directory `rel`, exactly as it lists them.
+fn mirror_names(r: &Run, rel: &str) -> BTreeSet<String> {
+    std::fs::read_dir(r.p.tree().join(rel))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+// on a case-insensitive filesystem (the macOS and Windows CI legs) the old spelling still stats
+// after the rename, and the mirror kept it while the sourcemap and the rewrite looked for the new
+// one, so the script shipped raw
+#[test]
+fn case_only_rename_is_mirrored_by_its_new_name() {
+    let mut r = start("normal-build");
+    r.put("src/mod/Thing.luau", "return require(\"@pkg/Promise\")");
+    r.step(&["src/mod/Thing.luau"]);
+    assert!(mirror_names(&r, "src/mod").contains("Thing.luau"));
+
+    std::fs::rename(
+        r.dir.join("src/mod/Thing.luau"),
+        r.dir.join("src/mod/thing.luau"),
+    )
+    .unwrap();
+    r.step(&["src/mod/Thing.luau", "src/mod/thing.luau"]);
+
+    let names = mirror_names(&r, "src/mod");
+    assert!(names.contains("thing.luau"), "{names:?}");
+    assert!(!names.contains("Thing.luau"), "{names:?}");
+    let thing = r.mirror("src/mod/thing.luau");
+    assert_eq!(thing, r#"return require("../pkg/Promise")"#);
+    r.fresh();
+
+    r.put("src/Newdir/a.luau", "return require(\"@mod/helpers\")");
+    r.step(&["src/Newdir"]);
+    std::fs::rename(r.dir.join("src/Newdir"), r.dir.join("src/newdir")).unwrap();
+    r.step(&["src/Newdir", "src/newdir"]);
+
+    let names = mirror_names(&r, "src");
+    assert!(
+        names.contains("newdir") && !names.contains("Newdir"),
+        "{names:?}"
+    );
+    let a = r.mirror("src/newdir/a.luau");
+    assert_eq!(a, r#"return require("../mod/helpers")"#);
+    r.fresh();
+}
+
 #[test]
 fn renamed_file_and_folder_are_moved() {
     let mut r = start("normal-build");
