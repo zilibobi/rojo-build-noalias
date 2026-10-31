@@ -608,9 +608,9 @@ mod tests {
     fn rebuild_is_strict_only_for_scopes_that_were_built() {
         let tmp = tempfile::tempdir().unwrap();
         let t = tmp.path();
-        write(&t.join("a/.luaurc"), r#"{"aliases": {"x": "./x"}}"#);
-        write(&t.join("b/.luaurc"), r#"{"aliases": {"y": "./y"},}"#);
-        let luaurcs = [t.join("a/.luaurc"), t.join("b/.luaurc")];
+        let luaurcs = [t.join("a").join(".luaurc"), t.join("b").join(".luaurc")];
+        write(&luaurcs[0], r#"{"aliases": {"x": "./x"}}"#);
+        write(&luaurcs[1], r#"{"aliases": {"y": "./y"},}"#);
         let o = opts(true);
 
         let first = ScopeSet::build(t, &luaurcs, &no_project, &o, &rojo(t));

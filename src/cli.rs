@@ -117,7 +117,7 @@ struct Raw {
 pub fn resolve_target(arg: Option<&Path>, cwd: &Path) -> Target {
     let Some(arg) = arg else {
         return Target {
-            dir: normalize(cwd),
+            dir: crate::paths::resolved(&normalize(cwd)),
             file_name: None,
         };
     };
@@ -129,14 +129,14 @@ pub fn resolve_target(arg: Option<&Path>, cwd: &Path) -> Target {
 
         if let (Some(file_name), Some(parent)) = (file_name, full.parent()) {
             return Target {
-                dir: parent.to_path_buf(),
+                dir: crate::paths::resolved(parent),
                 file_name: Some(file_name),
             };
         }
     }
 
     Target {
-        dir: full,
+        dir: crate::paths::resolved(&full),
         file_name: None,
     }
 }
@@ -179,7 +179,8 @@ pub fn parse(args: Vec<OsString>, cwd: &Path) -> Result<Mode, CliError> {
     let target = resolve_target(raw.project.as_deref(), cwd);
 
     if let Some(dir) = raw.convert_to {
-        let out_dir = normalize(&cwd.join(dir));
+        // spelled as the target is, so the refusal compares like with like
+        let out_dir = crate::paths::resolved_existing(&normalize(&cwd.join(dir)));
 
         if target.dir.starts_with(&out_dir) {
             return Err(CliError::Refused(
@@ -289,7 +290,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("dev.project.json"), "{}").unwrap();
         let t = resolve_target(Some(Path::new("dev.project.json")), tmp.path());
-        assert_eq!(t.dir, tmp.path());
+        assert_eq!(t.dir, crate::paths::resolved(tmp.path()));
         assert_eq!(t.file_name.as_deref(), Some("dev.project.json"));
         assert_eq!(
             t.project_in(Path::new("/ws")),
@@ -302,8 +303,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join("proj")).unwrap();
 
+        let real = crate::paths::resolved(tmp.path());
         let t = resolve_target(Some(Path::new("proj")), tmp.path());
-        assert_eq!(t.dir, tmp.path().join("proj"));
+        assert_eq!(t.dir, real.join("proj"));
         assert_eq!(t.file_name, None);
         assert_eq!(t.project_in(Path::new("/ws")), Path::new("/ws"));
 
@@ -311,10 +313,10 @@ mod tests {
         assert_eq!(t.dir, tmp.path().join("nope/x"));
         assert_eq!(t.file_name, None);
 
-        assert_eq!(resolve_target(None, tmp.path()).dir, tmp.path());
+        assert_eq!(resolve_target(None, tmp.path()).dir, real);
         assert_eq!(
             resolve_target(Some(Path::new("proj///")), tmp.path()).dir,
-            tmp.path().join("proj")
+            real.join("proj")
         );
     }
 
@@ -324,7 +326,7 @@ mod tests {
         std::fs::write(tmp.path().join("dev.project.json"), "{}").unwrap();
         let b = build(&["dev.project.json", "--output", "x.rbxm"], tmp.path());
         assert_eq!(b.output, OutputTarget::File(PathBuf::from("x.rbxm")));
-        assert_eq!(b.target.dir, tmp.path());
+        assert_eq!(b.target.dir, crate::paths::resolved(tmp.path()));
         assert_eq!(b.target.file_name.as_deref(), Some("dev.project.json"));
         assert!(!b.watch);
     }
@@ -346,7 +348,7 @@ mod tests {
 
         match parse(args(&["--convert-to", "./out/"]), cwd) {
             Ok(Mode::Convert(c)) => {
-                assert_eq!(c.out_dir, cwd.join("out"));
+                assert_eq!(c.out_dir, crate::paths::resolved(cwd).join("out"));
                 assert!(!c.watch_ignored);
             }
             other => panic!("{other:?}"),

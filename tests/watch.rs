@@ -729,3 +729,20 @@ fn symlinked_mount_root_is_watched() {
     w.assert_no_raw_aliases();
     w.assert_matches_fresh_build();
 }
+
+#[cfg(unix)]
+#[test]
+fn output_spelled_through_a_link_does_not_loop() {
+    // macOS's temp dir is /var/folders, a link to /private/var/folders, and events come in the
+    // resolved spelling: the output given through the link must still be known as the output
+    let (g, p) = fixture("normal-build");
+    let link = g.path().join("link");
+    std::os::unix::fs::symlink(g.path(), &link).unwrap();
+    let linked = link.join(p.file_name().unwrap());
+    let w = Watcher::spawn_out(&linked, &linked.join("src/out.rbxm"), &[]);
+    assert!(w.wait_built(secs(10)), "{}", w.log());
+
+    assert!(w.count_built(secs(3)) <= 1, "{}", w.log());
+    assert!(!w.has(&["out"]), "the output was built into itself");
+    w.assert_matches_fresh_build();
+}

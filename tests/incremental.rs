@@ -1,12 +1,20 @@
 mod common;
 
-use common::{fixture, read};
+use common::read;
 use rojo_build_noalias::cli::{BuildArgs, ColorChoice, Options, OutputTarget, Target};
 use rojo_build_noalias::diff::{ChangeSet, Hints};
 use rojo_build_noalias::pipeline::{Applied, Pipeline};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
+
+/// The fixture with its project dir resolved: the pipeline and the watcher's events spell it that
+/// way (macOS reports /private/var for a temp dir under /var), so hints built from it are too.
+fn fixture(name: &str) -> (tempfile::TempDir, PathBuf) {
+    let (guard, dir) = common::fixture(name);
+    let dir = dunce::canonicalize(&dir).unwrap();
+    (guard, dir)
+}
 
 fn args_for(dir: &Path, out: &Path) -> BuildArgs {
     BuildArgs {

@@ -24,6 +24,43 @@ pub fn normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// `path` with links resolved and, on Windows, short names made long and no `\\?\` prefix,
+/// when it exists; else `path` as it is.
+pub fn resolved(path: &Path) -> PathBuf {
+    dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// `path` with its nearest existing ancestor [`resolved`] and the rest joined on as given, so a
+/// directory that does not exist yet is spelled as the existing part of it is.
+pub fn resolved_existing(path: &Path) -> PathBuf {
+    for dir in path.ancestors() {
+        if dir.as_os_str().is_empty() {
+            break;
+        }
+
+        if let Ok(real) = dunce::canonicalize(dir) {
+            let rest = path.strip_prefix(dir).unwrap_or(Path::new(""));
+
+            return if rest.as_os_str().is_empty() {
+                real
+            } else {
+                real.join(rest)
+            };
+        }
+    }
+
+    path.to_path_buf()
+}
+
+/// `path` with its parent directory [`resolved`], so a file that does not exist yet (an output)
+/// is spelled as its directory is.
+pub fn resolved_parent(path: &Path) -> PathBuf {
+    match (path.parent(), path.file_name()) {
+        (Some(dir), Some(name)) if !dir.as_os_str().is_empty() => resolved(dir).join(name),
+        _ => path.to_path_buf(),
+    }
+}
+
 pub fn is_script(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|e| e.to_str()),
@@ -109,5 +146,24 @@ mod tests {
         assert!(is_init(Path::new("init.lua")));
         assert!(!is_init(Path::new("/p/reinit.luau")));
         assert!(!is_init(Path::new("/p/init.json")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolved_spellings_follow_links_in_the_existing_part() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = dunce::canonicalize(tmp.path()).unwrap();
+        std::fs::create_dir(real.join("d")).unwrap();
+        std::os::unix::fs::symlink(real.join("d"), real.join("l")).unwrap();
+        let link = tmp.path().join("l");
+
+        assert_eq!(resolved(&link), real.join("d"));
+        assert_eq!(resolved(&link.join("gone")), link.join("gone"));
+        assert_eq!(
+            resolved_parent(&link.join("out.rbxm")),
+            real.join("d/out.rbxm")
+        );
+        assert_eq!(resolved_existing(&link.join("a/b")), real.join("d/a/b"));
+        assert_eq!(resolved_existing(&link), real.join("d"));
     }
 }

@@ -108,6 +108,79 @@ fn output_inside_a_mount_is_not_built_into_itself() {
     assert_eq!(std::fs::read(p.join("src/out.rbxm")).unwrap(), first);
 }
 
+/// `dir` spelled through a link made beside its parent, removed with the guard's parent.
+#[cfg(unix)]
+fn through_a_link(guard: &Path, dir: &Path) -> std::path::PathBuf {
+    let link = guard.join("link");
+    std::os::unix::fs::symlink(guard, &link).unwrap();
+    link.join(dir.strip_prefix(guard).unwrap())
+}
+
+#[cfg(unix)]
+#[test]
+fn output_inside_a_mount_spelled_through_a_link_is_not_built_into_itself() {
+    let (g, p) = fixture("normal-build");
+    let linked = through_a_link(g.path(), &p);
+    let out = linked.join("src/out.rbxm");
+    let args = ["-o", out.to_str().unwrap()];
+    assert_ok(&build(&linked, &args));
+    assert_ok(&build(&linked, &args));
+
+    let roots = model::load(&out);
+    assert!(roots[0].find(&["out"]).is_none(), "{:#?}", roots[0].shape());
+}
+
+#[cfg(unix)]
+#[test]
+fn messages_spell_the_project_dir_one_way() {
+    // a project named through a link: every message names it resolved, as a Windows 8.3 short
+    // name is printed long
+    let (g, p) = fixture("normal-build");
+    let linked = through_a_link(g.path(), &p);
+    let real = dunce::canonicalize(&p).unwrap();
+    let out = g.path().join("out.rbxm");
+    let run = common::rbn()
+        .current_dir(g.path())
+        .env("TMPDIR", tmp_of(&p))
+        .args(["--color", "never", "-v", "-o"])
+        .arg(&out)
+        .arg(&linked)
+        .output()
+        .unwrap();
+    assert_ok(&run);
+
+    let s = text(&run);
+    assert!(
+        s.contains(&format!("Copying project from {}", real.display())),
+        "{s}"
+    );
+    assert!(
+        s.contains(&format!(
+            "Processed project: {}",
+            real.join("default.project.json").display()
+        )),
+        "{s}"
+    );
+    assert!(!s.contains(&linked.display().to_string()), "{s}");
+
+    let converted = g.path().join("converted");
+    let run = common::rbn()
+        .current_dir(g.path())
+        .args(["--color", "never", "-v", "--convert-to"])
+        .arg(&converted)
+        .arg(&linked)
+        .output()
+        .unwrap();
+    assert_ok(&run);
+
+    let s = text(&run);
+    assert!(
+        s.contains(&format!("Converting project from {} to ", real.display())),
+        "{s}"
+    );
+    assert!(!s.contains(&linked.display().to_string()), "{s}");
+}
+
 #[test]
 fn missing_output_dir_fails_without_a_marker() {
     let (_g, p) = fixture("normal-build");

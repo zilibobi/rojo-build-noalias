@@ -53,7 +53,9 @@ impl Pipeline {
     /// Creates the workspace, mirrors the mount closure into it and de-aliases every covered
     /// script, printing the replacement table with `-v`. Nothing is built yet.
     pub fn start(args: &BuildArgs) -> anyhow::Result<Pipeline> {
-        let project_dir = args.target.dir.clone();
+        // one spelling for every comparison and message: the one events arrive in (macOS reports
+        // /private/var for /var) and the long one on Windows (no 8.3 short names)
+        let project_dir = paths::resolved(&args.target.dir);
         let verbose = log::verbose() > 0;
 
         if !project_dir.is_dir() {
@@ -66,7 +68,7 @@ impl Pipeline {
         let output = match &args.output {
             OutputTarget::File(given) => {
                 let cwd = std::env::current_dir().context("cannot read the current directory")?;
-                Some(paths::normalize(&cwd.join(given)))
+                Some(paths::resolved_parent(&paths::normalize(&cwd.join(given))))
             }
             OutputTarget::Plugin(_) => None,
         };
@@ -740,7 +742,7 @@ impl Pipeline {
 
 /// The file `output` points to when it is a symlink.
 fn link_target(output: &Path) -> Option<PathBuf> {
-    let target = paths::normalize(&output::through_links(output).ok()?);
+    let target = paths::resolved_parent(&paths::normalize(&output::through_links(output).ok()?));
     (target != output).then_some(target)
 }
 
