@@ -129,9 +129,11 @@ fn replacement_table_prints_only_with_verbose() {
     );
 
     let loud = text(&convert(&p, &p.join("../loud-out"), &["-v"]));
+    // the binary prints the resolved path (macOS /private/var, no \\?\ on Windows)
+    let resolved = dunce::canonicalize(&p).unwrap();
     let title = format!(
         "OK   Processed project: {}",
-        p.join("default.project.json").display()
+        resolved.join("default.project.json").display()
     );
     assert!(loud.contains(&title), "{loud}");
     assert!(loud.contains("INFO Done in "), "{loud}");
