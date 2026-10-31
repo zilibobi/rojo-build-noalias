@@ -97,6 +97,18 @@ fn failed_build_exits_one_and_keeps_the_old_output() {
 }
 
 #[test]
+fn output_inside_a_mount_is_not_built_into_itself() {
+    let (_g, p) = fixture("normal-build");
+    assert_ok(&build(&p, &["-o", "src/out.rbxm"]));
+    let first = std::fs::read(p.join("src/out.rbxm")).unwrap();
+
+    assert_ok(&build(&p, &["-o", "src/out.rbxm"]));
+    let roots = model::load(&p.join("src/out.rbxm"));
+    assert!(roots[0].find(&["out"]).is_none(), "{:#?}", roots[0].shape());
+    assert_eq!(std::fs::read(p.join("src/out.rbxm")).unwrap(), first);
+}
+
+#[test]
 fn missing_output_dir_fails_without_a_marker() {
     let (_g, p) = fixture("normal-build");
     let out = build(&p, &["-o", "nowhere/out.rbxm"]);

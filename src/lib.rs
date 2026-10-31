@@ -13,4 +13,5 @@ pub mod rojo;
 pub mod scopes;
 pub mod shutdown;
 pub mod sourcemap;
+pub mod watch;
 pub mod workspace;

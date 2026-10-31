@@ -40,6 +40,22 @@ pub fn on_request(f: impl Fn() + Send + Sync + 'static) {
     callbacks.push(Box::new(f));
 }
 
+/// Routes SIGINT, SIGTERM and SIGHUP (Ctrl-C and closing the console on Windows) into
+/// [`request`]. A second signal while the first is still being handled exits at once, so a hung
+/// shutdown can still be interrupted. Install it before anything starts a child, since a rojo
+/// child runs in a process group of its own and a terminal's Ctrl-C no longer reaches it.
+pub fn install() -> anyhow::Result<()> {
+    ctrlc::set_handler(|| {
+        if requested() {
+            std::process::exit(130);
+        }
+
+        request();
+    })?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

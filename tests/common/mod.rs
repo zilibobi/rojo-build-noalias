@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod model;
+pub mod watcher;
 
 use std::path::{Path, PathBuf};
 use std::process::Output;

@@ -1,5 +1,5 @@
 use crate::cli::ColorChoice;
-use crate::{log, sourcemap};
+use crate::{log, shutdown, sourcemap};
 use anyhow::Context;
 use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Read};
@@ -139,6 +139,13 @@ fn running_program(program: &str) -> usize {
 /// this with `shutdown::on_request`; it is safe to call from any thread.
 pub fn kill_running() -> usize {
     kill_where(|_| true)
+}
+
+/// Kills every running rojo child on the first shutdown request, from whichever thread makes it.
+pub fn kill_on_shutdown() {
+    shutdown::on_request(|| {
+        kill_running();
+    });
 }
 
 fn kill_where(pick: impl Fn(&OsStr) -> bool) -> usize {

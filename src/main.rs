@@ -1,5 +1,5 @@
 use rojo_build_noalias::cli::{self, CliError, Mode};
-use rojo_build_noalias::{convert, log, pipeline};
+use rojo_build_noalias::{convert, log, pipeline, rojo, shutdown, watch};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -29,13 +29,26 @@ fn main() -> ExitCode {
             log::init(args.opts.color);
             log::set_verbose(args.opts.verbose);
 
-            if args.watch {
-                log::error("not implemented yet");
-                return ExitCode::from(1);
+            // before anything spawns rojo, which a terminal's Ctrl-C no longer reaches
+            if let Err(e) = shutdown::install() {
+                log::warn(&format!("cannot handle signals: {e}"));
             }
 
-            match pipeline::run_once(&args) {
+            rojo::kill_on_shutdown();
+
+            let result = if args.watch {
+                watch::run(&args)
+            } else {
+                pipeline::run_once(&args)
+            };
+
+            match result {
                 Ok(()) => ExitCode::SUCCESS,
+                Err(_) if shutdown::requested() && args.watch => ExitCode::SUCCESS,
+                Err(_) if shutdown::requested() => {
+                    log::error("interrupted");
+                    ExitCode::from(1)
+                }
                 Err(e) => {
                     log::error(&format!("{e:#}"));
                     ExitCode::from(1)

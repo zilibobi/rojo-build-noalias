@@ -4,7 +4,7 @@ use crate::project::{self, Mounts};
 use crate::rojo::{BuildOut, Rojo};
 use crate::scopes::{self, ScopeSet};
 use crate::workspace::{self, Meta, Snapshot, Workspace};
-use crate::{log, output, paths, report};
+use crate::{log, output, paths, report, shutdown};
 use anyhow::Context;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -117,6 +117,12 @@ impl Pipeline {
             ws,
             recover: false,
         };
+
+        for rel in pipeline.output_rels() {
+            if pipeline.snapshot.entries.contains_key(&rel) {
+                pipeline.unmirror(&rel)?;
+            }
+        }
 
         pipeline.dealias_all()?;
 
@@ -319,7 +325,38 @@ impl Pipeline {
         )?;
         changes.config |= self.recover;
 
+        for set in [
+            &mut changes.added,
+            &mut changes.removed,
+            &mut changes.changed,
+        ] {
+            set.retain(|rel| !self.is_output(rel));
+        }
+
         Ok(changes)
+    }
+
+    /// The output, and the file a symlinked output points to, relative to the project directory
+    /// when they lie inside it.
+    fn output_rels(&self) -> Vec<PathBuf> {
+        self.output
+            .iter()
+            .chain(&self.output_target)
+            .filter_map(|p| p.strip_prefix(&self.project_dir).ok())
+            .map(Path::to_path_buf)
+            .collect()
+    }
+
+    /// Whether `rel` is the output or a `.rbn-*` temp file beside it. An output inside a mount
+    /// is never mirrored, so a build never holds the build before it.
+    fn is_output(&self, rel: &Path) -> bool {
+        let temp = rel
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with(".rbn-"));
+
+        self.output_rels()
+            .iter()
+            .any(|out| out == rel || (temp && out.parent() == rel.parent()))
     }
 
     /// Whether an event on `path` can concern the build: a path the build reads (under a root, a
@@ -717,8 +754,14 @@ struct Batch {
     added_scripts: BTreeSet<PathBuf>,
 }
 
-/// A one-shot build: start, build once, and remove the workspace.
+/// A one-shot build: start, build once, and remove the workspace. A shutdown request between the
+/// two builds nothing.
 pub fn run_once(args: &BuildArgs) -> anyhow::Result<()> {
     let mut pipeline = Pipeline::start(args)?;
+
+    if shutdown::requested() {
+        anyhow::bail!("interrupted");
+    }
+
     pipeline.build()
 }
