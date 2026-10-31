@@ -191,12 +191,14 @@ pub fn mirror_mounts(
     };
 
     for root in &mounts.roots {
-        // a root inside another one is copied with it
-        if mounts
+        // a root inside another one is copied with it, unless the outer copy leaves it out for a
+        // skip name between the two
+        let inside = mounts
             .roots
             .iter()
-            .any(|o| o != root && root.starts_with(o))
-        {
+            .any(|o| o != root && root.strip_prefix(o).is_ok_and(|rest| !paths::skipped(rest)));
+
+        if inside {
             continue;
         }
 

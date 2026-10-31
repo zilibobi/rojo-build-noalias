@@ -1,6 +1,6 @@
 use crate::log;
 use anyhow::Context;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// How often a rename refused on Windows (Studio holding the output open) is retried.
@@ -9,10 +9,14 @@ const RETRY_WAIT: Duration = Duration::from_millis(50);
 
 /// Puts a copy of `built` at `dest` atomically (spec 7.3): the bytes go into a `.rbn-*` temp file
 /// beside `dest`, which is then renamed over it, so a reader sees the old file or the new one and
-/// never half of either. The output keeps the mode of the file it replaces (a new one takes the
+/// never half of either. An output that is a symlink is written through: the swap happens at the
+/// file it points to, beside that file, and the link stays. The output keeps the mode of the file it replaces (a new one takes the
 /// built file's), not the temp file's owner-only mode. On Windows a refused rename is retried, then
 /// the bytes are copied over `dest` with a warning.
 pub fn swap(built: &Path, dest: &Path) -> anyhow::Result<()> {
+    let target = through_links(dest)?;
+    let dest = target.as_path();
+
     let dir = match dest.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => dir,
         _ => Path::new("."),
@@ -60,6 +64,31 @@ pub fn swap(built: &Path, dest: &Path) -> anyhow::Result<()> {
             }
         }
     }
+}
+
+/// How many links [`through_links`] follows before giving up, as Linux's `MAXSYMLINKS`.
+const MAX_LINKS: usize = 40;
+
+/// `path` with every symlink at its end followed, even to a target that does not exist yet.
+fn through_links(path: &Path) -> anyhow::Result<PathBuf> {
+    let mut path = path.to_path_buf();
+
+    for _ in 0..MAX_LINKS {
+        let is_link = std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink());
+
+        if !is_link {
+            return Ok(path);
+        }
+
+        let to = std::fs::read_link(&path)
+            .with_context(|| format!("cannot read the link {}", path.display()))?;
+        path = match path.parent() {
+            Some(dir) => dir.join(to),
+            None => to,
+        };
+    }
+
+    anyhow::bail!("too many levels of symlinks at {}", path.display())
 }
 
 #[cfg(test)]
@@ -123,5 +152,44 @@ mod tests {
         std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o664)).unwrap();
         swap(&built, &dest).unwrap();
         assert_eq!(mode(&dest), 0o664);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn swap_writes_through_a_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let built = tmp.path().join("build.rbxm");
+        let real_dir = tmp.path().join("real");
+        let link_dir = tmp.path().join("links");
+        std::fs::create_dir(&real_dir).unwrap();
+        std::fs::create_dir(&link_dir).unwrap();
+        let target = real_dir.join("out.rbxm");
+        std::fs::write(&target, "old").unwrap();
+        let link = link_dir.join("out.rbxm");
+        std::os::unix::fs::symlink("../real/out.rbxm", &link).unwrap();
+
+        std::fs::write(&built, "new").unwrap();
+        swap(&built, &link).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert!(temp_names(&real_dir).is_empty());
+        assert!(temp_names(&link_dir).is_empty());
+
+        // a dangling link gets its target created
+        std::fs::remove_file(&target).unwrap();
+        swap(&built, &link).unwrap();
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
     }
 }

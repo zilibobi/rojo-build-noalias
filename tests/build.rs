@@ -339,3 +339,24 @@ fn missing_project_dir_is_an_error() {
     assert!(text(&out).contains("does not exist"), "{}", text(&out));
     assert!(!p.join("out.rbxm").exists());
 }
+
+#[test]
+fn nested_root_through_a_skip_name_is_mirrored() {
+    // the outer root leaves src/node_modules out; the inner root names it itself
+    let (_g, p) = fixture("normal-build");
+    write(&p.join("src/node_modules/x/Thing.luau"), "return 1");
+    std::fs::write(
+        p.join("default.project.json"),
+        r#"{"name": "X", "tree": {"$className": "Folder", "A": {"$path": "src"}, "B": {"$path": "src/node_modules/x"}}}"#,
+    )
+    .unwrap();
+
+    assert_ok(&build(&p, &["-o", "out.rbxm"]));
+    let roots = model::load(&p.join("out.rbxm"));
+    assert!(roots[0].find(&["B", "Thing"]).is_some(), "{roots:?}");
+
+    // the one mirror now holds src/node_modules/x, so A shows it too, as plain Rojo builds it
+    let plain = common::rojo_build(&p, &p.join("default.project.json"), &p.join("plain.rbxm"));
+    let shape = |roots: &[model::Inst]| roots.iter().map(model::Inst::shape).collect::<Vec<_>>();
+    assert_eq!(shape(&roots), shape(&plain));
+}
