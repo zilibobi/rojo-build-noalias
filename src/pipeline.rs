@@ -17,6 +17,8 @@ pub struct Pipeline {
     project_dir: PathBuf,
     /// the output file, absolute; `None` in plugin mode
     output: Option<PathBuf>,
+    /// the file a symlinked output points to, resolved at start and after every apply
+    output_target: Option<PathBuf>,
     rojo: Rojo,
     mounts: Mounts,
     snapshot: Snapshot,
@@ -101,6 +103,7 @@ impl Pipeline {
         let mut pipeline = Pipeline {
             args: args.clone(),
             project_dir,
+            output_target: output.as_deref().and_then(link_target),
             output,
             rojo,
             mounts,
@@ -231,8 +234,15 @@ impl Pipeline {
     }
 
     /// One `rojo build` of the mirror into `out/build.<ext of OUTPUT>`, swapped into place, then
-    /// the marker. In plugin mode Rojo writes the plugin itself.
+    /// the marker. In plugin mode Rojo writes the plugin itself. Refused while the last apply
+    /// failed, since the mirror may then hold a half-applied batch.
     pub fn build(&mut self) -> anyhow::Result<()> {
+        if self.recover {
+            anyhow::bail!(
+                "the last batch failed to apply, so the mirror is not built until one applies"
+            );
+        }
+
         let project = self.args.target.project_in(&self.tree());
 
         if log::verbose() > 0 {
@@ -327,12 +337,8 @@ impl Pipeline {
 
         let path = paths::normalize(path);
 
-        if let Some(out) = &self.output {
-            let target = output::through_links(out).map(|t| paths::normalize(&t));
-
-            if path == *out || target.is_ok_and(|t| t == path) {
-                return false;
-            }
+        if self.output.as_ref() == Some(&path) || self.output_target.as_ref() == Some(&path) {
+            return false;
         }
 
         let Ok(rel) = path.strip_prefix(&self.project_dir) else {
@@ -350,6 +356,7 @@ impl Pipeline {
     pub fn apply(&mut self, changes: &ChangeSet) -> anyhow::Result<Applied> {
         let recovering = self.recover;
         self.recover = true;
+        self.output_target = self.output.as_deref().and_then(link_target);
         let applied = self.apply_changes(changes, recovering)?;
         self.recover = false;
 
@@ -482,9 +489,10 @@ impl Pipeline {
         )
     }
 
-    /// Mirrors the added or changed entry `rel` from the project. A script that is new is written
-    /// raw, so that the sourcemaps see it, and rewritten before apply returns; a changed one is
-    /// only rewritten. An entry that has gone since the diff is removed.
+    /// Mirrors the added or changed entry `rel` from the project. A script that is new is created
+    /// empty, so that the sourcemaps see it without raw aliases ever sitting in the mirror, and is
+    /// written once its scopes are known; a changed one is only rewritten then. An entry that has
+    /// gone since the diff is removed.
     fn mirror_entry(&mut self, rel: &Path, batch: &mut Batch) -> anyhow::Result<()> {
         let src = self.project_dir.join(rel);
         let dest = self.tree().join(rel);
@@ -526,10 +534,8 @@ impl Pipeline {
 
         if paths::is_script(rel) {
             if !dest.is_file() {
-                if workspace::write_if_changed(&dest, &bytes)? {
-                    batch.wrote.insert(rel.to_path_buf());
-                }
-
+                workspace::place_script(&dest)?;
+                batch.wrote.insert(rel.to_path_buf());
                 batch.added_scripts.insert(rel.to_path_buf());
             }
 
@@ -570,7 +576,6 @@ impl Pipeline {
             self.raw.remove(k);
         }
 
-        self.raw.retain(|k, _| !k.starts_with(rel));
         self.remove_empty_parents(rel);
 
         Ok(gone.len())
@@ -694,6 +699,12 @@ impl Pipeline {
 
         report::print(&logs, elapsed);
     }
+}
+
+/// The file `output` points to when it is a symlink.
+fn link_target(output: &Path) -> Option<PathBuf> {
+    let target = paths::normalize(&output::through_links(output).ok()?);
+    (target != output).then_some(target)
 }
 
 /// What one apply has done so far.

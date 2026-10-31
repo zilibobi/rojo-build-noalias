@@ -78,6 +78,13 @@ impl Run {
         read(&self.p.tree().join(rel))
     }
 
+    fn args_output(&self) -> PathBuf {
+        match &self.args.output {
+            OutputTarget::File(path) => path.clone(),
+            OutputTarget::Plugin(_) => unreachable!("the tests build to a file"),
+        }
+    }
+
     fn fresh(&self) {
         assert_mirror_equals_fresh(&self.p, &self.args);
     }
@@ -297,7 +304,7 @@ fn broken_luaurc_keeps_previous_aliases() {
     assert!(format!("{err:#}").contains(".luaurc"), "{err:#}");
     assert_eq!(scripts(&r), before);
 
-    // a later edit is still rewritten with the aliases that parsed last
+    // while it stays broken a script edit fails too, and lands once it parses again
     let helpers = read(&r.dir.join("src/mod/helpers.luau"));
     r.put("src/mod/helpers.luau", &format!("{helpers}-- more\n"));
     assert!(r.try_step(&["src/mod/helpers.luau"]).is_err());
@@ -620,4 +627,60 @@ fn new_nested_project_is_mounted() {
             .contains(Path::new("src/sub/default.project.json"))
     );
     r.fresh();
+}
+
+/// Every mirrored script that still holds an alias require.
+fn raw_requires(p: &Pipeline) -> Vec<PathBuf> {
+    listing(&p.tree())
+        .into_iter()
+        .filter(|(rel, bytes)| {
+            let script = rel.extension().is_some_and(|e| e == "luau" || e == "lua");
+            let text = bytes.as_deref().map(String::from_utf8_lossy);
+            script
+                && text
+                    .is_some_and(|t| t.contains("require(\"@mod") || t.contains("require(\"@pkg"))
+        })
+        .map(|(rel, _)| rel)
+        .collect()
+}
+
+#[test]
+fn a_failed_apply_leaves_no_raw_script_and_refuses_to_build() {
+    let mut r = start("normal-build");
+    let good = read(&r.dir.join(".luaurc"));
+    r.put(".luaurc", "{");
+    r.put("src/new.luau", "return require(\"@mod/helpers\")");
+
+    assert!(r.try_step(&[".luaurc", "src/new.luau"]).is_err());
+
+    assert!(raw_requires(&r.p).is_empty(), "{:?}", raw_requires(&r.p));
+    let err = r.p.build().unwrap_err();
+    assert!(format!("{err:#}").contains("failed"), "{err:#}");
+    assert!(!r.args_output().exists());
+
+    r.put(".luaurc", &good);
+    r.try_step(&[".luaurc"]).unwrap();
+    assert!(raw_requires(&r.p).is_empty());
+    r.p.build().unwrap();
+    assert!(r.args_output().is_file());
+    r.fresh();
+}
+
+#[test]
+fn a_failed_config_apply_leaves_no_raw_script_in_a_new_mount() {
+    let mut r = start("normal-build");
+    r.put("extra/x.luau", "return require(\"@pkg/Promise\")");
+    r.put(
+        "default.project.json",
+        r#"{"name": "NormalBuild", "tree": {"$path": "src", "pkg": {"$path": "pkg"}, "extra": {"$path": "extra"}}}"#,
+    );
+    r.put(".luaurc", "{");
+
+    assert!(
+        r.try_step(&["default.project.json", "extra", ".luaurc"])
+            .is_err()
+    );
+
+    assert!(raw_requires(&r.p).is_empty(), "{:?}", raw_requires(&r.p));
+    assert!(r.p.build().is_err());
 }

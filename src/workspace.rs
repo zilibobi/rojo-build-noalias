@@ -158,15 +158,19 @@ pub fn copy_tree(from: &Path, to: &Path, exclude: Option<&Path>) -> anyhow::Resu
 }
 
 /// One mirrored entry's source metadata. `hash` is [`content_hash`] of a file that is not a
-/// script (a script's bytes are kept whole), else 0, so a same-length save is seen however coarse
-/// the file system's mtimes are.
+/// script (a script's bytes are kept whole) whose mtime lay within [`COARSE_MTIME`] of the moment
+/// it was mirrored. Only such a file can be saved again with the same length and mtime; any later
+/// write to an older one gives it a newer mtime, whatever the file system's resolution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Meta {
     pub dir: bool,
     pub len: u64,
     pub mtime: SystemTime,
-    pub hash: u64,
+    pub hash: Option<u64>,
 }
+
+/// The coarsest mtime resolution taken into account: FAT's two seconds (HFS+ has one).
+pub const COARSE_MTIME: Duration = Duration::from_secs(2);
 
 /// A hash of a file's bytes, stable within one run.
 pub fn content_hash(bytes: &[u8]) -> u64 {
@@ -203,6 +207,7 @@ pub fn mirror_mounts(
         snapshot: &mut snapshot,
         raw: &mut raw,
         touched: Vec::new(),
+        placeholders: false,
     };
 
     for root in &mounts.roots {
@@ -236,9 +241,10 @@ pub fn mirror_mounts(
 }
 
 /// Mirrors `rel` (a file, or a directory and everything below it) from `src` into `tree` with
-/// [`mirror_mounts`]' rules, recording it in `snapshot` and `raw`. Returns the paths that were
-/// not in the snapshot before or whose mirrored bytes were written: a script among them now holds
-/// its raw bytes and has to be rewritten. A missing `rel` mirrors nothing.
+/// [`mirror_mounts`]' rules, recording it in `snapshot` and `raw`, except that a script's raw
+/// bytes never reach the mirror: a missing script is created empty (so a sourcemap sees it) and an
+/// existing one is left as it is, until the caller rewrites it. Returns the paths that were not in
+/// the snapshot before or were written, and every script visited. A missing `rel` mirrors nothing.
 pub fn mirror_path(
     src: &Path,
     tree: &Path,
@@ -252,6 +258,7 @@ pub fn mirror_path(
         snapshot,
         raw,
         touched: Vec::new(),
+        placeholders: true,
     };
     mirror.path(rel)?;
 
@@ -265,6 +272,8 @@ struct Mirror<'a> {
     raw: &'a mut BTreeMap<PathBuf, Vec<u8>>,
     /// what this mirror put in the snapshot that was not there, or wrote
     touched: Vec<PathBuf>,
+    /// scripts are created empty instead of raw (see [`mirror_path`])
+    placeholders: bool,
 }
 
 impl Mirror<'_> {
@@ -307,10 +316,18 @@ impl Mirror<'_> {
                 continue;
             };
 
-            let wrote = write_if_changed(&dest, &bytes)?;
+            let script = paths::is_script(&rel);
+
+            let wrote = if script && self.placeholders {
+                place_script(&dest)?;
+                true
+            } else {
+                write_if_changed(&dest, &bytes)?
+            };
+
             self.record(rel.clone(), Meta::file(&rel, &bytes, mtime), wrote);
 
-            if paths::is_script(&rel) {
+            if script {
                 self.raw.insert(rel, bytes);
             }
         }
@@ -331,7 +348,7 @@ impl Meta {
             dir: true,
             len: 0,
             mtime,
-            hash: 0,
+            hash: None,
         }
     }
 
@@ -341,13 +358,34 @@ impl Meta {
             dir: false,
             len: bytes.len() as u64,
             mtime,
-            hash: if paths::is_script(rel) {
-                0
-            } else {
-                content_hash(bytes)
-            },
+            hash: (!paths::is_script(rel) && recent(mtime)).then(|| content_hash(bytes)),
         }
     }
+}
+
+/// Whether `mtime` lies within [`COARSE_MTIME`] of now, or in the future.
+fn recent(mtime: SystemTime) -> bool {
+    SystemTime::now()
+        .duration_since(mtime)
+        .map_or(true, |age| age <= COARSE_MTIME)
+}
+
+/// Makes sure the script `dest` exists without putting raw bytes in it: an empty file when it is
+/// missing, else it stays as it is. Raw aliases must never sit in the mirror where a build could
+/// see them.
+pub fn place_script(dest: &Path) -> anyhow::Result<()> {
+    if dest.is_file() {
+        return Ok(());
+    }
+
+    if dest.is_dir() {
+        std::fs::remove_dir_all(dest)
+            .with_context(|| format!("cannot remove {}", dest.display()))?;
+    }
+
+    write_if_changed(dest, b"")?;
+
+    Ok(())
 }
 
 /// Writes `bytes` to `path` unless it already holds exactly them, creating its parents. Returns
@@ -540,6 +578,31 @@ mod tests {
 
     fn keys<V>(map: &BTreeMap<PathBuf, V>) -> Vec<String> {
         map.keys().map(|k| paths::slash(k)).collect()
+    }
+
+    #[test]
+    fn only_a_recent_non_script_is_hashed() {
+        let now = SystemTime::now();
+        let old = now - Duration::from_secs(60);
+
+        assert!(Meta::file(Path::new("a.txt"), b"x", now).hash.is_some());
+        assert!(Meta::file(Path::new("a.txt"), b"x", old).hash.is_none());
+        assert!(Meta::file(Path::new("a.luau"), b"x", now).hash.is_none());
+        assert!(Meta::dir(now).hash.is_none());
+    }
+
+    #[test]
+    fn place_script_never_writes_raw_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let new = tmp.path().join("a/new.luau");
+        let kept = tmp.path().join("kept.luau");
+        std::fs::write(&kept, "already rewritten").unwrap();
+
+        place_script(&new).unwrap();
+        place_script(&kept).unwrap();
+
+        assert_eq!(std::fs::read(&new).unwrap(), b"");
+        assert_eq!(std::fs::read(&kept).unwrap(), b"already rewritten");
     }
 
     #[test]

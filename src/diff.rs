@@ -285,7 +285,12 @@ impl Differ<'_> {
             return true;
         }
 
-        std::fs::read(&path).map_or(true, |bytes| workspace::content_hash(&bytes) != old.hash)
+        // only a file mirrored within its mtime resolution can change without a newer mtime
+        let Some(hash) = old.hash else {
+            return false;
+        };
+
+        std::fs::read(&path).map_or(true, |bytes| workspace::content_hash(&bytes) != hash)
     }
 
     /// `rel` is new: it, every directory above it the snapshot lacks, and when it is a directory,
