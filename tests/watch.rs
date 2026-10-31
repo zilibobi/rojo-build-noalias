@@ -25,6 +25,39 @@ fn started(p: &Path) -> Watcher {
     w
 }
 
+/// Exactly one build lands: one marker within 10 s, then none for a second. Generous for a slow
+/// runner, and a batch split in two still shows, since a batch closes 200 ms after its last event.
+fn one_build(w: &Watcher) {
+    assert!(w.wait_built(secs(10)), "no build:\n{}", w.log());
+    assert_eq!(
+        w.count_built(secs(1)),
+        0,
+        "more than one build:\n{}",
+        w.log()
+    );
+}
+
+/// The batch fails: its WARN arrives within 10 s, and no marker since the last counted one, or
+/// for a second after the WARN.
+fn failed_batch(w: &Watcher) {
+    assert!(
+        w.wait_saw("WARN keeping the last good build at ", secs(10)),
+        "no failed batch:\n{}",
+        w.log()
+    );
+    assert!(w.saw("ERR "), "{}", w.log());
+    assert_eq!(w.count_built(secs(1)), 0, "{}", w.log());
+}
+
+/// The `-v` batch summaries since `mark`.
+fn summaries(w: &Watcher, mark: usize) -> Vec<String> {
+    w.lines_since(mark, "INFO ")
+        .into_iter()
+        .filter(|l| l.contains(" changed, ") && l.contains(" removed in "))
+        .map(|l| l[..l.find(" in ").unwrap()].to_string())
+        .collect()
+}
+
 fn source(w: &Watcher, path: &[&str]) -> String {
     w.find(path).source.unwrap_or_default()
 }
@@ -34,16 +67,16 @@ fn burst_of_five_files_is_one_build() {
     let (_g, p) = fixture("normal-build");
     let w = started(&p);
 
-    // spread over 100 ms, which a per-path debouncer splits into several batches
+    // 10 ms apart, which a per-path or a shorter window splits, well inside the 200 ms one
     for i in 0..5 {
         write(
             &p.join(format!("src/mod/b{i}.luau")),
             "return require(\"@pkg/Promise\")",
         );
-        std::thread::sleep(ms(25));
+        std::thread::sleep(ms(10));
     }
 
-    assert_eq!(w.count_built(secs(2)), 1, "{}", w.log());
+    one_build(&w);
     assert_eq!(
         source(&w, &["mod", "b4"]),
         "return require(\"../pkg/Promise\")"
@@ -93,12 +126,7 @@ fn broken_project_edit_keeps_last_good_build() {
     let original = read(&project);
 
     std::fs::write(&project, "{ not json").unwrap();
-    assert_eq!(w.count_built(secs(2)), 0, "{}", w.log());
-    assert!(
-        w.saw("ERR ") && w.saw("WARN keeping the last good build at "),
-        "{}",
-        w.log()
-    );
+    failed_batch(&w);
     assert_eq!(w.out_bytes(), good);
 
     std::fs::write(&project, original).unwrap();
@@ -116,7 +144,7 @@ fn new_folder_with_module_builds_once_and_keeps_watching() {
         &p.join("src/newdir/thing.luau"),
         "return require(\"@mod/helpers\")",
     );
-    assert_eq!(w.count_built(secs(2)), 1, "{}", w.log());
+    one_build(&w);
     assert_eq!(
         source(&w, &["newdir", "thing"]),
         "return require(\"../mod/helpers\")"
@@ -211,12 +239,7 @@ fn broken_luaurc_edit_keeps_last_good_build() {
     let original = read(&luaurc);
 
     std::fs::write(&luaurc, "{").unwrap();
-    assert_eq!(w.count_built(secs(2)), 0, "{}", w.log());
-    assert!(
-        w.saw("ERR ") && w.saw("WARN keeping the last good build at "),
-        "{}",
-        w.log()
-    );
+    failed_batch(&w);
     assert_eq!(w.out_bytes(), good);
 
     std::fs::write(&luaurc, original).unwrap();
@@ -239,7 +262,7 @@ fn atomic_save_via_rename_lands_and_temp_never_ships() {
     std::fs::write(&temp, "return require(\"@pkg/Promise\") -- saved").unwrap();
     std::fs::rename(&temp, &helpers).unwrap();
 
-    assert_eq!(w.count_built(secs(2)), 1, "{}", w.log());
+    one_build(&w);
     assert_eq!(
         source(&w, &["mod", "helpers"]),
         "return require(\"../pkg/Promise\") -- saved"
@@ -281,12 +304,7 @@ fn mount_root_deleted_and_recreated_is_rewatched() {
 
     // a required $path mount: the scope's sourcemap and Rojo both fail, so the last build stays
     std::fs::remove_dir_all(p.join("pkg")).unwrap();
-    assert_eq!(w.count_built(secs(2)), 0, "{}", w.log());
-    assert!(
-        w.saw("ERR ") && w.saw("WARN keeping the last good build at "),
-        "{}",
-        w.log()
-    );
+    failed_batch(&w);
     assert_eq!(w.out_bytes(), good);
 
     write(&p.join("pkg/Promise.luau"), &promise);
@@ -303,25 +321,49 @@ fn mount_root_deleted_and_recreated_is_rewatched() {
 #[test]
 fn churn_outside_mounts_builds_nothing() {
     let (_g, p) = fixture("normal-build");
-    let w = started(&p);
+    let w = Watcher::spawn(&p, &["-v"]);
+    assert!(w.wait_built(secs(10)), "{}", w.log());
+    let mark = w.mark();
 
     for i in 0..25 {
         write(&p.join(format!("junk/f{i}.luau")), "return 1");
         write(&p.join(format!("docs/n{i}.md")), "notes");
     }
 
-    assert_eq!(w.count_built(secs(2)), 0, "{}", w.log());
+    // then one real edit: its build is the only one, and its batch holds only the edit, however
+    // late a slow runner delivers the churn
+    std::thread::sleep(secs(1));
+    write(&p.join("src/mod/helpers.luau"), "return 5");
+    one_build(&w);
+    assert_eq!(
+        summaries(&w, mark),
+        ["INFO 1 changed, 0 added, 0 removed"],
+        "{}",
+        w.log()
+    );
     w.assert_matches_fresh_build();
 }
 
 #[test]
 fn touch_without_a_byte_change_builds_nothing() {
     let (_g, p) = fixture("normal-build");
-    let w = started(&p);
+    let w = Watcher::spawn(&p, &["-v"]);
+    assert!(w.wait_built(secs(10)), "{}", w.log());
+    let mark = w.mark();
     let helpers = p.join("src/mod/helpers.luau");
 
     std::fs::write(&helpers, read(&helpers)).unwrap();
-    assert_eq!(w.count_built(secs(2)), 0, "{}", w.log());
+
+    // then one real edit elsewhere: a build for the touch would come first
+    std::thread::sleep(secs(1));
+    write(&p.join("pkg/Promise.luau"), "return 5");
+    one_build(&w);
+    assert_eq!(
+        summaries(&w, mark),
+        ["INFO 1 changed, 0 added, 0 removed"],
+        "{}",
+        w.log()
+    );
     w.assert_matches_fresh_build();
 }
 
@@ -347,8 +389,8 @@ fn two_watchers_on_one_project_both_build() {
     assert_eq!(workspaces_in(a.tmp()).len(), 2, "both workspaces coexist");
 
     write(&p.join("src/mod/helpers.luau"), "return 7");
-    assert_eq!(a.count_built(secs(2)), 1, "{}", a.log());
-    assert_eq!(b.count_built(ms(500)), 1, "{}", b.log());
+    one_build(&a);
+    one_build(&b);
     assert_eq!(source(&a, &["mod", "helpers"]), "return 7");
     assert_eq!(source(&b, &["mod", "helpers"]), "return 7");
     assert_eq!(workspaces_in(a.tmp()).len(), 2);
@@ -453,6 +495,27 @@ fn idle_cpu_is_near_zero() {
 /// PATH and the file the hanging build writes its pids to.
 #[cfg(unix)]
 fn hanging_rojo(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let pids = dir.join("rojo-pids");
+    let build = format!(
+        "if [ \"$1\" = build ]; then\n  sleep 60 &\n  echo \"$$ $!\" > '{}'\n  wait\n  exit 1\nfi\n",
+        pids.display()
+    );
+
+    (fake_rojo(dir, &build), pids)
+}
+
+/// A `rojo` that appends its subcommand to the returned file, then runs the real one.
+#[cfg(unix)]
+fn counting_rojo(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let calls = dir.join("rojo-calls");
+    let log = format!("echo \"$1\" >> '{}'\n", calls.display());
+
+    (fake_rojo(dir, &log), calls)
+}
+
+/// A bin dir holding a `rojo` script that runs `prelude`, then execs the real rojo.
+#[cfg(unix)]
+fn fake_rojo(dir: &Path, prelude: &str) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
     let real = std::env::split_paths(&std::env::var_os("PATH").unwrap())
@@ -460,19 +523,14 @@ fn hanging_rojo(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
         .find(|f| f.is_file())
         .expect("rojo on PATH");
     let bin = dir.join("fakebin");
-    let pids = dir.join("rojo-pids");
     std::fs::create_dir_all(&bin).unwrap();
 
-    let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = build ]; then\n  sleep 60 &\n  echo \"$$ $!\" > '{}'\n  wait\n  exit 1\nfi\nexec '{}' \"$@\"\n",
-        pids.display(),
-        real.display()
-    );
+    let script = format!("#!/bin/sh\n{prelude}exec '{}' \"$@\"\n", real.display());
     let fake = bin.join("rojo");
     std::fs::write(&fake, script).unwrap();
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    (bin, pids)
+    bin
 }
 
 #[cfg(unix)]
@@ -582,4 +640,92 @@ fn sigint_during_a_one_shot_build_kills_rojo() {
     std::io::Read::read_to_string(&mut child.stdout.take().unwrap(), &mut text).unwrap();
     assert!(text.contains("ERR  interrupted"), "{text}");
     assert!(!text.contains("Built project to"), "{text}");
+}
+
+/// The `rojo build` runs the counting rojo has made so far.
+#[cfg(unix)]
+fn builds_in(calls: &Path) -> usize {
+    std::fs::read_to_string(calls)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| *l == "build")
+        .count()
+}
+
+#[cfg(unix)]
+#[test]
+fn a_build_that_keeps_failing_is_retried_only_on_an_edit() {
+    // the output dir goes away, so every build fails after diff and apply succeed; v1 and the
+    // first cut of this loop rebuilt every 200 ms until it came back
+    let (g, p) = fixture("normal-build");
+    let (bin, calls) = counting_rojo(g.path());
+    let path = path_with(&bin);
+    let out_dir = common::tmp_of(&p).join("outdir");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let w = Watcher::spawn_with(&p, &out_dir.join("out.rbxm"), &[], &[("PATH", &path)]);
+    assert!(w.wait_built(secs(10)), "{}", w.log());
+
+    std::fs::remove_dir_all(&out_dir).unwrap();
+    let mark = w.mark();
+    let before = builds_in(&calls);
+
+    write(&p.join("src/mod/helpers.luau"), "return 1");
+    std::thread::sleep(ms(1500));
+    write(&p.join("src/mod/helpers.luau"), "return 2");
+    std::thread::sleep(ms(1500));
+
+    let errors = w.lines_since(mark, "ERR ");
+    let runs = builds_in(&calls) - before;
+    assert!((1..=2).contains(&errors.len()), "{errors:?}\n{}", w.log());
+    assert!((1..=2).contains(&runs), "{runs} rojo builds:\n{}", w.log());
+    assert_eq!(w.count_built(ms(0)), 0, "{}", w.log());
+
+    // a failed apply owes a rewatch; the rescan that rewatch queues must not retry the build
+    let luaurc = p.join(".luaurc");
+    let original = read(&luaurc);
+    std::fs::write(&luaurc, "{").unwrap();
+    assert!(
+        w.wait_saw("keeping the last good build", secs(10)),
+        "{}",
+        w.log()
+    );
+    std::thread::sleep(ms(500));
+    let mark = w.mark();
+    let before = builds_in(&calls);
+    std::fs::write(&luaurc, original).unwrap();
+    std::thread::sleep(secs(3));
+
+    let errors = w.lines_since(mark, "ERR ");
+    assert_eq!(errors.len(), 1, "{errors:?}\n{}", w.log());
+    assert_eq!(builds_in(&calls) - before, 1, "{}", w.log());
+
+    // still owed: the next edit after the dir comes back lands
+    std::fs::create_dir_all(&out_dir).unwrap();
+    write(&p.join("src/mod/helpers.luau"), "return 3");
+    one_build(&w);
+    assert_eq!(source(&w, &["mod", "helpers"]), "return 3");
+    w.assert_matches_fresh_build();
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_mount_root_is_watched() {
+    let (_g, p) = fixture("normal-build");
+    std::fs::rename(p.join("pkg"), p.join("real_pkg")).unwrap();
+    std::os::unix::fs::symlink("real_pkg", p.join("pkg")).unwrap();
+    let w = started(&p);
+    assert!(w.has(&["pkg", "Promise"]));
+
+    write(
+        &p.join("real_pkg/Promise.luau"),
+        "return { through = true }",
+    );
+    one_build(&w);
+    assert_eq!(source(&w, &["pkg", "Promise"]), "return { through = true }");
+
+    write(&p.join("pkg/Added.luau"), "return 1");
+    one_build(&w);
+    assert!(w.has(&["pkg", "Added"]));
+    w.assert_no_raw_aliases();
+    w.assert_matches_fresh_build();
 }

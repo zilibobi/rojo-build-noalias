@@ -7,6 +7,7 @@ use crate::{log, paths, shutdown};
 use batcher::{Batcher, MAX_WAIT, QUIET};
 use notify::event::{AccessKind, AccessMode};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
+use std::collections::BTreeSet;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -34,23 +35,21 @@ pub fn run(args: &BuildArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let project_dir = pipeline.project_dir().to_path_buf();
-    let canonical = dunce::canonicalize(&project_dir)
-        .ok()
-        .filter(|c| *c != project_dir);
     let shown = match &args.output {
         OutputTarget::File(given) => given.display().to_string(),
         OutputTarget::Plugin(name) => format!("plugin {name}"),
     };
 
     // watching before the first build queues what changes during it
+    let mut warned = Warned::default();
+    let watches = watch_mounts(&tx, &pipeline, &mut warned);
     let mut watch = Loop {
-        watcher: watch_mounts(&tx, &pipeline),
+        watches,
         pipeline,
         tx,
         batcher: Batcher::new(QUIET, MAX_WAIT),
-        project_dir,
-        canonical,
+        real: false,
+        warned,
         shown,
         owed: false,
         full_next: false,
@@ -80,21 +79,35 @@ pub fn run(args: &BuildArgs) -> anyhow::Result<()> {
 struct Loop {
     pipeline: Pipeline,
     /// dropped and made again on a rewatch, so no stale watch survives a root that came back
-    watcher: Option<RecommendedWatcher>,
+    watches: Watches,
     tx: Sender<Msg>,
     batcher: Batcher,
-    project_dir: PathBuf,
-    /// the project dir with links resolved, when that differs: FSEvents reports real paths
-    canonical: Option<PathBuf>,
+    /// a file event went into the open batch; a batch holding only the rescans the loop queued
+    /// itself never pays an owed build
+    real: bool,
+    warned: Warned,
     /// OUTPUT as given, or `plugin <name>`
     shown: String,
-    /// the last build or batch failed, so the next batch that applies builds even when it wrote
-    /// nothing
+    /// the last build or batch failed, so the next batch with a file event builds even when it
+    /// wrote nothing
     owed: bool,
     /// the next batch is a full rescan
     full_next: bool,
-    /// the watches are made again after the next batch that applies
+    /// the watches are made again after the next batch that applies; set by a failed diff,
+    /// apply or panic, never by a failed build
     rewatch_owed: bool,
+}
+
+/// How a batch failed: a failed build leaves the mirror and the watches as they should be.
+enum Failure {
+    Batch(anyhow::Error),
+    Build(anyhow::Error),
+}
+
+impl From<anyhow::Error> for Failure {
+    fn from(e: anyhow::Error) -> Failure {
+        Failure::Batch(e)
+    }
 }
 
 impl Loop {
@@ -136,13 +149,20 @@ impl Loop {
     }
 
     /// Adds the paths of one event that can concern the build to the open batch. A watcher error
-    /// or a rescan flag (a lost event) makes the batch a full rescan.
+    /// (warned once per cause) or a rescan flag (a lost event) makes the batch a full rescan.
     fn event(&mut self, event: notify::Result<notify::Event>) {
         let now = Instant::now();
 
         let event = match event {
             Ok(event) if !event.need_rescan() => event,
-            _ => {
+            Ok(_) => {
+                self.real = true;
+                self.batcher.push(now, [], true);
+                return;
+            }
+            Err(e) => {
+                self.warned.warn(&e, None);
+                self.real = true;
                 self.batcher.push(now, [], true);
                 return;
             }
@@ -158,29 +178,13 @@ impl Loop {
         let paths: Vec<PathBuf> = event
             .paths
             .iter()
-            .map(|p| self.localize(p))
+            .flat_map(|p| rebase(p, &self.watches.aliases))
             .filter(|p| self.pipeline.relevant(p))
             .collect();
 
         if !paths.is_empty() {
+            self.real = true;
             self.batcher.push(now, paths, false);
-        }
-    }
-
-    /// An event path spelled under the project dir as the pipeline knows it.
-    fn localize(&self, path: &Path) -> PathBuf {
-        let path = paths::normalize(path);
-
-        if path.starts_with(&self.project_dir) {
-            return path;
-        }
-
-        match &self.canonical {
-            Some(real) => match path.strip_prefix(real) {
-                Ok(rel) => self.project_dir.join(rel),
-                Err(_) => path,
-            },
-            None => path,
         }
     }
 
@@ -188,32 +192,37 @@ impl Loop {
     /// batch a full rescan; a shutdown that interrupted the batch is not reported.
     fn batch(&mut self, mut hints: Hints) {
         hints.full |= std::mem::take(&mut self.full_next);
-        let result = catch_unwind(AssertUnwindSafe(|| self.land(&hints)));
+        let real = std::mem::take(&mut self.real);
+        let result = catch_unwind(AssertUnwindSafe(|| self.land(&hints, real)));
 
         if shutdown::requested() {
             return;
         }
 
-        let message = match result {
+        let (message, rewatch) = match result {
             Ok(Ok(())) => return,
-            Ok(Err(e)) => format!("{e:#}"),
-            Err(panic) => format!("panic: {}", panic_text(panic.as_ref())),
+            Ok(Err(Failure::Build(e))) => (format!("{e:#}"), false),
+            Ok(Err(Failure::Batch(e))) => (format!("{e:#}"), true),
+            Err(panic) => (format!("panic: {}", panic_text(panic.as_ref())), true),
         };
 
         log::error(&message);
         log::warn(&format!("keeping the last good build at {}", self.shown));
         self.owed = true;
         self.full_next = true;
-        self.rewatch_owed = true;
+        self.rewatch_owed |= rewatch;
     }
 
-    /// Diff, apply, rewatch when the mounts moved, and build when the mirror changed or a build
-    /// is owed. Never builds after a failed apply.
-    fn land(&mut self, hints: &Hints) -> anyhow::Result<()> {
+    /// Diff, apply, rewatch when the mounts moved, and build when the mirror changed, or when a
+    /// build is owed and a file event is in the batch (`real`). Never builds after a failed
+    /// apply, and a failing build is retried only on the next file event, never on a rescan the
+    /// loop queued itself.
+    fn land(&mut self, hints: &Hints, real: bool) -> Result<(), Failure> {
         let started = Instant::now();
+        let pays = self.owed && real;
         let changes = self.pipeline.diff(hints)?;
 
-        if changes.is_empty() && !self.owed {
+        if changes.is_empty() && !pays {
             return Ok(());
         }
 
@@ -237,8 +246,8 @@ impl Loop {
             return Ok(());
         }
 
-        if applied.dirty() || self.owed {
-            self.pipeline.build()?;
+        if applied.dirty() || pays {
+            self.pipeline.build().map_err(Failure::Build)?;
             self.owed = false;
         }
 
@@ -248,18 +257,28 @@ impl Loop {
     /// Makes the watches again from the current mounts. A file written into a new root before
     /// its watch existed is caught by the full rescan this queues.
     fn rewatch(&mut self) {
-        self.watcher = None;
-        self.watcher = watch_mounts(&self.tx, &self.pipeline);
+        self.watches = Watches::default();
+        self.watches = watch_mounts(&self.tx, &self.pipeline, &mut self.warned);
         self.rewatch_owed = false;
         self.batcher.push(Instant::now(), [], true);
     }
 }
 
+/// The watcher and how the watched paths are spelled once links are resolved.
+#[derive(Default)]
+struct Watches {
+    /// held only to keep the watches alive
+    _watcher: Option<RecommendedWatcher>,
+    /// (resolved, as the pipeline spells it) for every watched path whose resolved spelling
+    /// differs: FSEvents reports real paths, so a symlinked root or project dir reports its target
+    aliases: Vec<(PathBuf, PathBuf)>,
+}
+
 /// A watcher on what the pipeline mounts: each directory root recursively, and shallowly the
 /// directories above roots, projects and `.luaurc` files (spec 7.2). A root that does not exist
-/// is not watched; the shallow watch on its parent sees it appear. `None` when no watcher can be
+/// is not watched; the shallow watch on its parent sees it appear. No watcher when none can be
 /// made at all, which is warned about: the loop then only reacts to a shutdown.
-fn watch_mounts(tx: &Sender<Msg>, pipeline: &Pipeline) -> Option<RecommendedWatcher> {
+fn watch_mounts(tx: &Sender<Msg>, pipeline: &Pipeline, warned: &mut Warned) -> Watches {
     let tx = tx.clone();
     let made = notify::recommended_watcher(move |event| {
         let _ = tx.send(Msg::Fs(event));
@@ -269,7 +288,7 @@ fn watch_mounts(tx: &Sender<Msg>, pipeline: &Pipeline) -> Option<RecommendedWatc
         Ok(watcher) => watcher,
         Err(e) => {
             log::warn(&format!("cannot watch for file changes: {e}"));
-            return None;
+            return Watches::default();
         }
     };
 
@@ -277,6 +296,7 @@ fn watch_mounts(tx: &Sender<Msg>, pipeline: &Pipeline) -> Option<RecommendedWatc
     let (deep, shallow) = pipeline.mounts().watch_dirs();
     let deep = deep.iter().map(|r| (r, RecursiveMode::Recursive));
     let shallow = shallow.iter().map(|r| (r, RecursiveMode::NonRecursive));
+    let mut aliases = Vec::new();
 
     for (rel, mode) in deep.chain(shallow) {
         let path = if rel.as_os_str().is_empty() {
@@ -288,11 +308,78 @@ fn watch_mounts(tx: &Sender<Msg>, pipeline: &Pipeline) -> Option<RecommendedWatc
         if let Err(e) = watcher.watch(&path, mode)
             && path.exists()
         {
-            log::warn(&format!("cannot watch {}: {e}", path.display()));
+            warned.warn(&e, Some(&path));
+        }
+
+        if let Ok(real) = dunce::canonicalize(&path)
+            && real != path
+        {
+            aliases.push((real, path));
         }
     }
 
-    Some(watcher)
+    Watches {
+        _watcher: Some(watcher),
+        aliases,
+    }
+}
+
+/// `path` as the event gave it, plus each spelling it has under a watched path whose resolved
+/// spelling it starts with. Every candidate is offered to `relevant()`.
+fn rebase(path: &Path, aliases: &[(PathBuf, PathBuf)]) -> Vec<PathBuf> {
+    let path = paths::normalize(path);
+    let mut out = vec![path.clone()];
+
+    for (real, given) in aliases {
+        if let Ok(rel) = path.strip_prefix(real) {
+            let spelled = if rel.as_os_str().is_empty() {
+                given.clone()
+            } else {
+                given.join(rel)
+            };
+
+            if !out.contains(&spelled) {
+                out.push(spelled);
+            }
+        }
+    }
+
+    out
+}
+
+/// Watcher errors already warned about, by cause, so a recurring one warns once.
+#[derive(Default)]
+struct Warned(BTreeSet<String>);
+
+impl Warned {
+    fn warn(&mut self, e: &notify::Error, path: Option<&Path>) {
+        let cause = cause(e);
+
+        if !self.0.insert(cause.clone()) {
+            return;
+        }
+
+        let path = path.or(e.paths.first().map(PathBuf::as_path));
+
+        match path {
+            Some(path) => log::warn(&format!("cannot watch {}: {cause}", path.display())),
+            None => log::warn(&format!("file watching failed: {cause}")),
+        }
+    }
+}
+
+/// What went wrong, without the paths, so one cause warns once.
+fn cause(e: &notify::Error) -> String {
+    match &e.kind {
+        notify::ErrorKind::MaxFilesWatch => "the limit on watched folders is reached \
+            (on Linux, fs.inotify.max_user_watches), so changes in some folders are missed; \
+            raise it, for example with `sudo sysctl fs.inotify.max_user_watches=524288`, and \
+            restart the watch"
+            .to_string(),
+        notify::ErrorKind::Generic(text) => text.clone(),
+        notify::ErrorKind::Io(io) => io.to_string(),
+        other => format!("{other:?}"),
+    }
 }
 
 fn panic_text(panic: &(dyn std::any::Any + Send)) -> String {
@@ -305,4 +392,56 @@ fn panic_text(panic: &(dyn std::any::Any + Send)) -> String {
     }
 
     "unknown cause".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rebase_spells_a_resolved_path_as_the_pipeline_does() {
+        let aliases = vec![
+            (PathBuf::from("/private/var/p"), PathBuf::from("/var/p")),
+            (
+                PathBuf::from("/private/var/p/real_pkg"),
+                PathBuf::from("/var/p/pkg"),
+            ),
+        ];
+
+        assert_eq!(
+            rebase(Path::new("/private/var/p/src/a.luau"), &aliases),
+            [
+                PathBuf::from("/private/var/p/src/a.luau"),
+                PathBuf::from("/var/p/src/a.luau")
+            ]
+        );
+        assert_eq!(
+            rebase(Path::new("/private/var/p/real_pkg/x.luau"), &aliases),
+            [
+                PathBuf::from("/private/var/p/real_pkg/x.luau"),
+                PathBuf::from("/var/p/real_pkg/x.luau"),
+                PathBuf::from("/var/p/pkg/x.luau")
+            ]
+        );
+        assert_eq!(
+            rebase(Path::new("/private/var/p/real_pkg"), &aliases)[2],
+            PathBuf::from("/var/p/pkg")
+        );
+        assert_eq!(
+            rebase(Path::new("/var/p/src/./a.luau"), &aliases),
+            [PathBuf::from("/var/p/src/a.luau")]
+        );
+    }
+
+    #[test]
+    fn a_watcher_error_warns_once_per_cause_and_names_the_watch_limit() {
+        let limit = notify::Error::new(notify::ErrorKind::MaxFilesWatch);
+        assert!(cause(&limit).contains("fs.inotify.max_user_watches"));
+
+        let mut warned = Warned::default();
+        warned.warn(&limit, Some(Path::new("/p/a")));
+        warned.warn(&limit, Some(Path::new("/p/b")));
+        warned.warn(&notify::Error::generic("boom"), None);
+        assert_eq!(warned.0.len(), 2);
+    }
 }

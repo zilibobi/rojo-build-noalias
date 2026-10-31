@@ -22,6 +22,8 @@ pub struct Watcher {
     seen: RefCell<Vec<String>>,
     /// lines before this one have been counted by `wait_built` or `count_built`
     cursor: Cell<usize>,
+    /// lines before this one have been searched by `wait_saw`
+    searched: Cell<usize>,
     dir: PathBuf,
     out: PathBuf,
     tmp: PathBuf,
@@ -84,6 +86,7 @@ impl Watcher {
             lines,
             seen: RefCell::new(Vec::new()),
             cursor: Cell::new(0),
+            searched: Cell::new(0),
             dir: dir.to_path_buf(),
             out: out.to_path_buf(),
             tmp,
@@ -154,6 +157,45 @@ impl Watcher {
             .count();
         self.cursor.set(seen.len());
         count
+    }
+
+    /// Whether a line containing `needle` arrives within `within`, searching from after the last
+    /// line found this way.
+    pub fn wait_saw(&self, needle: &str, within: Duration) -> bool {
+        let deadline = Instant::now() + within;
+
+        loop {
+            self.drain();
+
+            let found = self.seen.borrow()[self.searched.get()..]
+                .iter()
+                .position(|l| l.contains(needle));
+
+            if let Some(i) = found {
+                self.searched.set(self.searched.get() + i + 1);
+                return true;
+            }
+
+            if !self.next_line(deadline) && Instant::now() >= deadline {
+                return false;
+            }
+        }
+    }
+
+    /// How many lines have arrived so far, to count from with [`Watcher::lines_since`].
+    pub fn mark(&self) -> usize {
+        self.drain();
+        self.seen.borrow().len()
+    }
+
+    /// The lines since `mark` that start with `prefix`.
+    pub fn lines_since(&self, mark: usize, prefix: &str) -> Vec<String> {
+        self.drain();
+        self.seen.borrow()[mark..]
+            .iter()
+            .filter(|l| l.starts_with(prefix))
+            .cloned()
+            .collect()
     }
 
     /// Whether any line so far contains `needle`.
