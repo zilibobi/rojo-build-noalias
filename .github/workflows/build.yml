@@ -27,9 +27,31 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+  version:
+    name: Check the tag against Cargo.toml
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compare
+        shell: bash
+        run: |
+          crate=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          echo "Cargo.toml version: $crate"
+
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag=${GITHUB_REF#refs/tags/v}
+
+            if [ "$tag" != "$crate" ]; then
+              echo "::error::tag v$tag does not match the Cargo.toml version $crate"
+              exit 1
+            fi
+          fi
+
   build:
     name: Build ${{ matrix.name }}
-    needs: test
+    needs: [test, version]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -78,6 +100,26 @@ jobs:
             echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
           else
             echo "VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)" >> "$GITHUB_OUTPUT"
+          fi
+
+      # every target runs on its runner: macos-x86_64 under Rosetta on macos-14, the aarch64
+      # builds on their arm runners
+      - name: Smoke test
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release/rojo-build-noalias"
+
+          if [ "$RUNNER_OS" = Windows ]; then
+            bin="$bin.exe"
+          fi
+
+          got=$("$bin" --version)
+          want="rojo-build-noalias ${{ steps.version.outputs.VERSION }}"
+          echo "$got"
+
+          if [ "$got" != "$want" ]; then
+            echo "::error::$bin --version printed '$got', expected '$want'"
+            exit 1
           fi
 
       - name: Zip (unix)
