@@ -621,14 +621,11 @@ mod tests {
         assert_eq!(again.scopes.len(), 1);
 
         // a parsed: breaking it is an error naming it
-        write(&t.join("a/.luaurc"), "{");
+        write(&luaurcs[0], "{");
         let err = ScopeSet::rebuild(t, &luaurcs, &no_project, &o, &rojo(t), &first)
             .unwrap_err()
             .to_string();
-        assert!(
-            err.contains(&t.join("a/.luaurc").display().to_string()),
-            "{err}"
-        );
+        assert!(err.contains(&luaurcs[0].display().to_string()), "{err}");
     }
 
     #[test]

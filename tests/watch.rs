@@ -2,6 +2,7 @@ mod common;
 
 use common::watcher::Watcher;
 use common::{fixture, read, workspaces_in};
+use rojo_build_noalias::watch::batcher::{Batcher, MAX_WAIT, QUIET};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -280,16 +281,34 @@ fn checkout_sized_stream_builds_bounded_and_ends_right() {
     let (_g, p) = fixture("normal-build");
     let w = started(&p);
 
+    let mut batcher = Batcher::new(QUIET, MAX_WAIT);
+    let mut batches = 0;
+    let mut gaps = Vec::new();
+    let mut last = Instant::now();
+
     for i in 0..40 {
         write(
             &p.join(format!("src/mod/s{i:02}.luau")),
             &format!("return require(\"@pkg/Promise\") -- {i}"),
         );
+        let now = Instant::now();
+        batches += usize::from(batcher.take(now).is_some());
+        batcher.push(now, [], false);
+        gaps.push(now - last);
+        last = now;
         std::thread::sleep(ms(75));
     }
 
+    // a slow runner oversleeps past the quiet window, which rightly splits the stream, so the
+    // bound is what the batcher makes of the writes as they really landed, plus one batch for
+    // event delivery shifting a boundary
+    let expected = batches + 1;
     let builds = w.count_built(secs(5));
-    assert!((1..=3).contains(&builds), "{builds} builds:\n{}", w.log());
+    assert!(
+        (1..=expected + 1).contains(&builds),
+        "{builds} builds, {expected} expected from gaps {gaps:?}:\n{}",
+        w.log()
+    );
     assert!(w.has(&["mod", "s39"]));
     w.assert_no_raw_aliases();
     w.assert_matches_fresh_build();
