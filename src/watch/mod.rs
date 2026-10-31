@@ -21,7 +21,9 @@ pub enum Msg {
 
 /// Watch mode (spec 7.2): start, build, then one diff, apply and at most one build per batch of
 /// file events, until a shutdown request. A failed batch keeps the last good build and the loop
-/// keeps watching; only a failed start is an error.
+/// keeps watching. A failed start is an error, and so is having no watcher at all (at start or on
+/// a rewatch): a watch that cannot see changes exits 1, so a supervisor restarts it, instead of
+/// waiting for nothing.
 pub fn run(args: &BuildArgs) -> anyhow::Result<()> {
     let (tx, rx) = mpsc::channel();
     let stop = tx.clone();
@@ -41,20 +43,7 @@ pub fn run(args: &BuildArgs) -> anyhow::Result<()> {
     };
 
     // watching before the first build queues what changes during it
-    let mut warned = Warned::default();
-    let watches = watch_mounts(&tx, &pipeline, &mut warned);
-    let mut watch = Loop {
-        watches,
-        pipeline,
-        tx,
-        batcher: Batcher::new(QUIET, MAX_WAIT),
-        real: false,
-        warned,
-        shown,
-        owed: false,
-        full_next: false,
-        rewatch_owed: false,
-    };
+    let mut watch = Loop::new(pipeline, tx, recommended, shown)?;
 
     if log::verbose() > 0 {
         log::info("Watch mode enabled. Watching for file changes...\n");
@@ -71,9 +60,16 @@ pub fn run(args: &BuildArgs) -> anyhow::Result<()> {
 
     // anything that changed while starting
     watch.batcher.push(Instant::now(), [], true);
-    watch.run(&rx);
+    watch.run(&rx)
+}
 
-    Ok(())
+/// Makes the platform's watcher, sending its events to the loop.
+type Make = fn(Sender<Msg>) -> notify::Result<RecommendedWatcher>;
+
+fn recommended(tx: Sender<Msg>) -> notify::Result<RecommendedWatcher> {
+    notify::recommended_watcher(move |event| {
+        let _ = tx.send(Msg::Fs(event));
+    })
 }
 
 struct Loop {
@@ -81,7 +77,10 @@ struct Loop {
     /// dropped and made again on a rewatch, so no stale watch survives a root that came back
     watches: Watches,
     tx: Sender<Msg>,
+    make: Make,
     batcher: Batcher,
+    /// a rewatch that made no watcher: the loop ends with it
+    fatal: Option<anyhow::Error>,
     /// a file event went into the open batch; a batch holding only the rescans the loop queued
     /// itself never pays an owed build
     real: bool,
@@ -102,6 +101,8 @@ struct Loop {
 enum Failure {
     Batch(anyhow::Error),
     Build(anyhow::Error),
+    /// no watcher could be made: the watch cannot go on
+    Fatal(anyhow::Error),
 }
 
 impl From<anyhow::Error> for Failure {
@@ -111,39 +112,63 @@ impl From<anyhow::Error> for Failure {
 }
 
 impl Loop {
-    fn run(&mut self, rx: &Receiver<Msg>) {
+    fn new(pipeline: Pipeline, tx: Sender<Msg>, make: Make, shown: String) -> anyhow::Result<Loop> {
+        let mut warned = Warned::default();
+        let watches = watch_mounts(make, &tx, &pipeline, &mut warned)?;
+
+        Ok(Loop {
+            pipeline,
+            watches,
+            tx,
+            make,
+            batcher: Batcher::new(QUIET, MAX_WAIT),
+            fatal: None,
+            real: false,
+            warned,
+            shown,
+            owed: false,
+            full_next: false,
+            rewatch_owed: false,
+        })
+    }
+
+    fn run(&mut self, rx: &Receiver<Msg>) -> anyhow::Result<()> {
         loop {
             // no batch open: block with no timeout, so an idle watch costs nothing
             let msg = match self.batcher.deadline() {
                 None => match rx.recv() {
                     Ok(msg) => Some(msg),
-                    Err(_) => return,
+                    Err(_) => return Ok(()),
                 },
                 Some(deadline) => {
                     match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
                         Ok(msg) => Some(msg),
                         Err(RecvTimeoutError::Timeout) => None,
-                        Err(RecvTimeoutError::Disconnected) => return,
+                        Err(RecvTimeoutError::Disconnected) => return Ok(()),
                     }
                 }
             };
 
             match msg {
-                Some(Msg::Shutdown) => return,
+                Some(Msg::Shutdown) => return Ok(()),
                 Some(Msg::Fs(event)) => self.event(event),
                 None => {}
             }
 
             if shutdown::requested() {
-                return;
+                return Ok(());
             }
 
             if let Some(hints) = self.batcher.take(Instant::now()) {
                 self.batch(hints);
             }
 
+            if let Some(e) = self.fatal.take() {
+                return Err(e);
+            }
+
             if shutdown::requested() {
-                return;
+                return Ok(());
             }
         }
     }
@@ -195,16 +220,21 @@ impl Loop {
         let real = std::mem::take(&mut self.real);
         let result = catch_unwind(AssertUnwindSafe(|| self.land(&hints, real)));
 
-        if shutdown::requested() {
-            return;
-        }
-
         let (message, rewatch) = match result {
             Ok(Ok(())) => return,
+            // the loop ends with it, and the caller reports it
+            Ok(Err(Failure::Fatal(e))) => {
+                self.fatal = Some(e);
+                return;
+            }
             Ok(Err(Failure::Build(e))) => (format!("{e:#}"), false),
             Ok(Err(Failure::Batch(e))) => (format!("{e:#}"), true),
             Err(panic) => (format!("panic: {}", panic_text(panic.as_ref())), true),
         };
+
+        if shutdown::requested() {
+            return;
+        }
 
         log::error(&message);
         log::warn(&format!("keeping the last good build at {}", self.shown));
@@ -239,7 +269,7 @@ impl Loop {
         }
 
         if applied.rewatch || self.rewatch_owed {
-            self.rewatch();
+            self.rewatch().map_err(Failure::Fatal)?;
         }
 
         if shutdown::requested() {
@@ -255,12 +285,15 @@ impl Loop {
     }
 
     /// Makes the watches again from the current mounts. A file written into a new root before
-    /// its watch existed is caught by the full rescan this queues.
-    fn rewatch(&mut self) {
+    /// its watch existed is caught by the full rescan this queues. The old watcher goes first,
+    /// which frees its instance for the new one; when no new one can be made the watch is over,
+    /// as at start, since the old one may miss a root that came back.
+    fn rewatch(&mut self) -> anyhow::Result<()> {
         self.watches = Watches::default();
-        self.watches = watch_mounts(&self.tx, &self.pipeline, &mut self.warned);
+        self.watches = watch_mounts(self.make, &self.tx, &self.pipeline, &mut self.warned)?;
         self.rewatch_owed = false;
         self.batcher.push(Instant::now(), [], true);
+        Ok(())
     }
 }
 
@@ -276,21 +309,25 @@ struct Watches {
 
 /// A watcher on what the pipeline mounts: each directory root recursively, and shallowly the
 /// directories above roots, projects and `.luaurc` files (spec 7.2). A root that does not exist
-/// is not watched; the shallow watch on its parent sees it appear. No watcher when none can be
-/// made at all, which is warned about: the loop then only reacts to a shutdown.
-fn watch_mounts(tx: &Sender<Msg>, pipeline: &Pipeline, warned: &mut Warned) -> Watches {
-    let tx = tx.clone();
-    let made = notify::recommended_watcher(move |event| {
-        let _ = tx.send(Msg::Fs(event));
-    });
-
-    let mut watcher = match made {
-        Ok(watcher) => watcher,
-        Err(e) => {
-            log::warn(&format!("cannot watch for file changes: {e}"));
-            return Watches::default();
-        }
-    };
+/// is not watched; the shallow watch on its parent sees it appear. An error when no watcher can be
+/// made at all (on Linux, every inotify instance the user may have is taken).
+fn watch_mounts(
+    make: Make,
+    tx: &Sender<Msg>,
+    pipeline: &Pipeline,
+    warned: &mut Warned,
+) -> anyhow::Result<Watches> {
+    let mut watcher = make(tx.clone()).map_err(|e| {
+        anyhow::anyhow!(
+            "cannot watch for file changes: {}{}",
+            cause(&e),
+            if cfg!(target_os = "linux") {
+                " (on Linux, fs.inotify.max_user_instances limits the watchers one user may have)"
+            } else {
+                ""
+            }
+        )
+    })?;
 
     let dir = pipeline.project_dir();
     let (deep, shallow) = pipeline.mounts().watch_dirs();
@@ -318,10 +355,10 @@ fn watch_mounts(tx: &Sender<Msg>, pipeline: &Pipeline, warned: &mut Warned) -> W
         }
     }
 
-    Watches {
+    Ok(Watches {
         _watcher: Some(watcher),
         aliases,
-    }
+    })
 }
 
 /// `path` as the event gave it, plus each spelling it has under a watched path whose resolved
@@ -431,6 +468,75 @@ mod tests {
             rebase(Path::new("/var/p/src/./a.luau"), &aliases),
             [PathBuf::from("/var/p/src/a.luau")]
         );
+    }
+
+    fn no_watcher(_: Sender<Msg>) -> notify::Result<RecommendedWatcher> {
+        Err(notify::Error::io(std::io::Error::other(
+            "no inotify instance left",
+        )))
+    }
+
+    /// A pipeline on a copy of a fixture, with its guard.
+    fn pipeline(name: &str) -> (tempfile::TempDir, Pipeline) {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(name);
+        crate::workspace::copy_tree(&src, &dir, None).unwrap();
+
+        let args = BuildArgs {
+            target: crate::cli::Target {
+                dir,
+                file_name: None,
+            },
+            output: OutputTarget::File(tmp.path().join("out.rbxm")),
+            watch: true,
+            opts: crate::cli::Options {
+                process_orphans: false,
+                wax_compat: false,
+                verbose: 0,
+                color: crate::cli::ColorChoice::Never,
+            },
+        };
+
+        (tmp, Pipeline::start(&args).unwrap())
+    }
+
+    #[test]
+    fn no_watcher_at_start_or_on_a_rewatch_ends_the_watch() {
+        let (_g, p) = pipeline("normal-build");
+        let (tx, _rx) = mpsc::channel();
+        let err = Loop::new(p, tx, no_watcher, String::new()).err().unwrap();
+        assert!(
+            format!("{err:#}")
+                .starts_with("cannot watch for file changes: no inotify instance left"),
+            "{err:#}"
+        );
+
+        let (_g, p) = pipeline("normal-build");
+        let (tx, _rx) = mpsc::channel();
+        let mut watch = Loop::new(p, tx, recommended, String::new()).unwrap();
+        watch.rewatch().unwrap();
+
+        watch.make = no_watcher;
+        assert!(watch.rewatch().is_err());
+
+        // a batch whose rewatch fails ends the loop with that error
+        let added = watch.pipeline.project_dir().join("src/mod/new.luau");
+        std::fs::write(&added, "return 1").unwrap();
+        watch.rewatch_owed = true;
+        watch.batch(Hints {
+            paths: BTreeSet::from([added]),
+            full: false,
+        });
+        assert!(watch.fatal.is_some());
+
+        let (stop, rx) = mpsc::channel();
+        stop.send(Msg::Shutdown).unwrap();
+        watch.batcher = Batcher::new(QUIET, MAX_WAIT);
+        watch.batcher.push(Instant::now() - MAX_WAIT, [], false);
+        assert!(watch.run(&rx).is_ok(), "a shutdown first ends it cleanly");
     }
 
     #[test]
