@@ -26,7 +26,7 @@ rokit add zilibobi/rojo-build-noalias
 
 ```toml
 [tools]
-"ubi:zilibobi/rojo-build-noalias" = "2.0.0"
+"ubi:zilibobi/rojo-build-noalias" = "2.0.1"
 ```
 
 ### Manual

@@ -1,6 +1,6 @@
 [package]
 name = "rojo-build-noalias"
-version = "2.0.0"
+version = "2.0.1"
 edition = "2024"
 rust-version = "1.89"
 description = "A wrapper around rojo build that replaces Luau alias requires with relative paths"
