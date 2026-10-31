@@ -779,6 +779,9 @@ fn case_only_rename_lands_dealiased_under_the_new_name() {
     one_build(&w);
 
     std::fs::rename(p.join("src/mod/Thing.luau"), p.join("src/mod/thing.luau")).unwrap();
+    // the filesystem is case-insensitive here, so the test cannot pass for want of the bug
+    #[cfg(any(target_os = "macos", windows))]
+    assert!(p.join("src/mod/Thing.luau").exists());
     one_build(&w);
     assert!(!w.has(&["mod", "Thing"]), "{:#?}", w.model()[0].shape());
     assert_eq!(

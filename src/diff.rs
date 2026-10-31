@@ -102,6 +102,13 @@ pub fn above_mount(mounts: &Mounts, rel: &Path) -> bool {
         .any(|m| m != rel && m.starts_with(rel))
 }
 
+/// Whether `rel` is spelled by the project file rather than the disk: a mount root, or a
+/// directory above a mount. Rojo takes `"$path": "vendor/Shared"` for `vendor/shared` on a
+/// case-insensitive filesystem, so such a path is never held to the disk's spelling.
+pub fn spelled_by_project(mounts: &Mounts, rel: &Path) -> bool {
+    mounts.roots.iter().any(|r| r == rel) || above_mount(mounts, rel)
+}
+
 /// Whether the build reads `rel` (relative to `project_dir`): [`Mounts::contains`] (with the meta
 /// file counted for a root that is a file now, not when the closure was made), or a file that
 /// would join the closure: a `.luaurc` above a root, or the project file a mounted `.luaurc`'s
@@ -238,7 +245,10 @@ impl Differ<'_> {
         match stat {
             // another spelling of a case-only rename: this one is gone, and the directory's
             // listing names the one that is there now
-            Ok(_) if !paths::named_exactly(&self.dir.join(rel)) => {
+            Ok(_)
+                if !spelled_by_project(self.mounts, rel)
+                    && !paths::named_exactly(&self.dir.join(rel)) =>
+            {
                 self.remove(rel);
 
                 if let Some(parent) = rel.parent()

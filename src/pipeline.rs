@@ -427,7 +427,8 @@ impl Pipeline {
                 continue;
             }
 
-            self.mirror_entry(rel, &mut batch)?;
+            let exact = !diff::spelled_by_project(&mounts, rel);
+            self.mirror_entry(rel, exact, &mut batch)?;
         }
 
         if config {
@@ -525,15 +526,16 @@ impl Pipeline {
     /// Mirrors the added or changed entry `rel` from the project. A script that is new is created
     /// empty, so that the sourcemaps see it without raw aliases ever sitting in the mirror, and is
     /// written once its scopes are known; a changed one is only rewritten then. An entry that has
-    /// gone since the diff is removed.
-    fn mirror_entry(&mut self, rel: &Path, batch: &mut Batch) -> anyhow::Result<()> {
+    /// gone since the diff is removed. `exact` holds the entry to the disk's spelling, which a path
+    /// the project file spells (a root, a directory above one) is not.
+    fn mirror_entry(&mut self, rel: &Path, exact: bool, batch: &mut Batch) -> anyhow::Result<()> {
         let src = self.project_dir.join(rel);
         let dest = self.tree().join(rel);
 
         // on a case-insensitive filesystem the old spelling of a case-only rename still opens
         let meta = std::fs::metadata(&src)
             .ok()
-            .filter(|_| paths::named_exactly(&src));
+            .filter(|_| !exact || paths::named_exactly(&src));
 
         let Some(meta) = meta else {
             batch.removed += self.unmirror(rel)?;
@@ -541,7 +543,7 @@ impl Pipeline {
         };
 
         // the mirror holding this entry under another spelling would keep that name
-        if dest.exists() && !paths::named_exactly(&dest) {
+        if exact && dest.exists() && !paths::named_exactly(&dest) {
             remove_entry(&dest)?;
         }
 

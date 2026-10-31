@@ -237,6 +237,9 @@ fn case_only_rename_is_mirrored_by_its_new_name() {
         r.dir.join("src/mod/thing.luau"),
     )
     .unwrap();
+    // the filesystem is case-insensitive here, so the test cannot pass for want of the bug
+    #[cfg(any(target_os = "macos", windows))]
+    assert!(r.dir.join("src/mod/Thing.luau").exists());
     r.step(&["src/mod/Thing.luau", "src/mod/thing.luau"]);
 
     let names = mirror_names(&r, "src/mod");
@@ -249,6 +252,8 @@ fn case_only_rename_is_mirrored_by_its_new_name() {
     r.put("src/Newdir/a.luau", "return require(\"@mod/helpers\")");
     r.step(&["src/Newdir"]);
     std::fs::rename(r.dir.join("src/Newdir"), r.dir.join("src/newdir")).unwrap();
+    #[cfg(any(target_os = "macos", windows))]
+    assert!(r.dir.join("src/Newdir").exists());
     r.step(&["src/Newdir", "src/newdir"]);
 
     let names = mirror_names(&r, "src");
@@ -258,6 +263,43 @@ fn case_only_rename_is_mirrored_by_its_new_name() {
     );
     let a = r.mirror("src/newdir/a.luau");
     assert_eq!(a, r#"return require("../mod/helpers")"#);
+    r.fresh();
+}
+
+// a case-insensitive filesystem only: Rojo cannot find vendor/Shared on Linux
+#[cfg(any(target_os = "macos", windows))]
+#[test]
+fn a_mount_spelled_in_another_case_keeps_its_files_on_a_hint() {
+    let (guard, dir) = fixture("normal-build");
+    std::fs::create_dir_all(dir.join("vendor/shared")).unwrap();
+    std::fs::write(
+        dir.join("vendor/shared/x.luau"),
+        "return require(\"@pkg/Promise\")",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("default.project.json"),
+        r#"{"name": "NormalBuild", "tree": {"$path": "src", "pkg": {"$path": "pkg"}, "vendor": {"$path": "vendor/Shared"}}}"#,
+    )
+    .unwrap();
+    let args = args_for(&dir, &guard.path().join("out.rbxm"));
+    let mut r = Run {
+        p: Pipeline::start(&args).unwrap(),
+        _guard: guard,
+        dir,
+        args,
+    };
+    let x = "vendor/Shared/x.luau";
+    assert!(r.p.tree().join(x).is_file());
+
+    // the root itself, the directory above it, and the project dir above both
+    for hint in ["vendor/Shared", "vendor", ""] {
+        let applied = r.step(&[hint]);
+        assert_eq!(applied.removed, 0, "a hint on {hint:?} removed the mount");
+        assert!(r.p.tree().join(x).is_file(), "a hint on {hint:?} lost {x}");
+    }
+
+    assert_eq!(r.mirror(x), r#"return require("../pkg/Promise")"#);
     r.fresh();
 }
 
