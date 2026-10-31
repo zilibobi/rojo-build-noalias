@@ -157,12 +157,24 @@ pub fn copy_tree(from: &Path, to: &Path, exclude: Option<&Path>) -> anyhow::Resu
     Ok(())
 }
 
-/// One mirrored entry's source metadata.
+/// One mirrored entry's source metadata. `hash` is [`content_hash`] of a file that is not a
+/// script (a script's bytes are kept whole), else 0, so a same-length save is seen however coarse
+/// the file system's mtimes are.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Meta {
     pub dir: bool,
     pub len: u64,
     pub mtime: SystemTime,
+    pub hash: u64,
+}
+
+/// A hash of a file's bytes, stable within one run.
+pub fn content_hash(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::hash::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Every entry [`mirror_mounts`] mirrored, keyed relative to the project directory.
@@ -183,11 +195,14 @@ pub fn mirror_mounts(
 ) -> anyhow::Result<(Snapshot, BTreeMap<PathBuf, Vec<u8>>)> {
     std::fs::create_dir_all(tree).with_context(|| format!("cannot create {}", tree.display()))?;
 
+    let mut snapshot = Snapshot::default();
+    let mut raw = BTreeMap::new();
     let mut mirror = Mirror {
         src,
         tree,
-        snapshot: Snapshot::default(),
-        raw: BTreeMap::new(),
+        snapshot: &mut snapshot,
+        raw: &mut raw,
+        touched: Vec::new(),
     };
 
     for root in &mounts.roots {
@@ -217,14 +232,39 @@ pub fn mirror_mounts(
         }
     }
 
-    Ok((mirror.snapshot, mirror.raw))
+    Ok((snapshot, raw))
+}
+
+/// Mirrors `rel` (a file, or a directory and everything below it) from `src` into `tree` with
+/// [`mirror_mounts`]' rules, recording it in `snapshot` and `raw`. Returns the paths that were
+/// not in the snapshot before or whose mirrored bytes were written: a script among them now holds
+/// its raw bytes and has to be rewritten. A missing `rel` mirrors nothing.
+pub fn mirror_path(
+    src: &Path,
+    tree: &Path,
+    rel: &Path,
+    snapshot: &mut Snapshot,
+    raw: &mut BTreeMap<PathBuf, Vec<u8>>,
+) -> anyhow::Result<Vec<PathBuf>> {
+    let mut mirror = Mirror {
+        src,
+        tree,
+        snapshot,
+        raw,
+        touched: Vec::new(),
+    };
+    mirror.path(rel)?;
+
+    Ok(mirror.touched)
 }
 
 struct Mirror<'a> {
     src: &'a Path,
     tree: &'a Path,
-    snapshot: Snapshot,
-    raw: BTreeMap<PathBuf, Vec<u8>>,
+    snapshot: &'a mut Snapshot,
+    raw: &'a mut BTreeMap<PathBuf, Vec<u8>>,
+    /// what this mirror put in the snapshot that was not there, or wrote
+    touched: Vec<PathBuf>,
 }
 
 impl Mirror<'_> {
@@ -259,14 +299,7 @@ impl Mirror<'_> {
             if meta.is_dir() {
                 std::fs::create_dir_all(&dest)
                     .with_context(|| format!("cannot create {}", dest.display()))?;
-                self.snapshot.entries.insert(
-                    rel,
-                    Meta {
-                        dir: true,
-                        len: 0,
-                        mtime,
-                    },
-                );
+                self.record(rel, Meta::dir(mtime), false);
                 continue;
             }
 
@@ -274,15 +307,8 @@ impl Mirror<'_> {
                 continue;
             };
 
-            write_if_changed(&dest, &bytes)?;
-            self.snapshot.entries.insert(
-                rel.clone(),
-                Meta {
-                    dir: false,
-                    len: bytes.len() as u64,
-                    mtime,
-                },
-            );
+            let wrote = write_if_changed(&dest, &bytes)?;
+            self.record(rel.clone(), Meta::file(&rel, &bytes, mtime), wrote);
 
             if paths::is_script(&rel) {
                 self.raw.insert(rel, bytes);
@@ -290,6 +316,37 @@ impl Mirror<'_> {
         }
 
         Ok(())
+    }
+
+    fn record(&mut self, rel: PathBuf, meta: Meta, wrote: bool) {
+        if self.snapshot.entries.insert(rel.clone(), meta).is_none() || wrote {
+            self.touched.push(rel);
+        }
+    }
+}
+
+impl Meta {
+    pub fn dir(mtime: SystemTime) -> Meta {
+        Meta {
+            dir: true,
+            len: 0,
+            mtime,
+            hash: 0,
+        }
+    }
+
+    /// The entry of the file `rel` holding `bytes`.
+    pub fn file(rel: &Path, bytes: &[u8], mtime: SystemTime) -> Meta {
+        Meta {
+            dir: false,
+            len: bytes.len() as u64,
+            mtime,
+            hash: if paths::is_script(rel) {
+                0
+            } else {
+                content_hash(bytes)
+            },
+        }
     }
 }
 

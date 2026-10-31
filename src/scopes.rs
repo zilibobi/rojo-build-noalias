@@ -2,13 +2,27 @@ use crate::cli::Options;
 use crate::dealias::{self, OrphanRules, ProjectRules, Replacement};
 use crate::rojo::Rojo;
 use crate::{log, luaurc, paths, project, sourcemap};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
 pub enum Rules {
     Project(ProjectRules),
     Orphan(OrphanRules),
+}
+
+impl Rules {
+    /// Whether both rewrite every require the same way: the same resolved table (project) or the
+    /// same aliases (orphan).
+    pub fn same_table(&self, other: &Rules) -> bool {
+        match (self, other) {
+            (Rules::Project(a), Rules::Project(b)) => {
+                a.root_name == b.root_name && a.targets == b.targets
+            }
+            (Rules::Orphan(a), Rules::Orphan(b)) => a.aliases == b.aliases,
+            _ => false,
+        }
+    }
 }
 
 /// One `.luaurc` and what it rewrites.
@@ -119,6 +133,7 @@ fn project_scope(
     dir: &Path,
     project: PathBuf,
     aliases: &BTreeMap<String, String>,
+    maps: &mut Sourcemaps,
     rojo: &Rojo,
     strict: bool,
 ) -> anyhow::Result<Option<Scope>> {
@@ -135,7 +150,11 @@ fn project_scope(
         }
     };
 
-    let node = match rojo.sourcemap(&project) {
+    let mapped = maps
+        .remove(&project)
+        .unwrap_or_else(|| rojo.sourcemap(&project));
+
+    let node = match mapped {
         Ok(node) => node,
         Err(e) => {
             skip(strict, e, |e| {
@@ -191,14 +210,14 @@ fn project_scope(
 /// One `.luaurc`'s scope, `None` when it is skipped (`init.luau:262-296`).
 fn build_one(
     luaurc: &Path,
-    lookup: &dyn Fn(&Path) -> Option<PathBuf>,
+    project: Option<PathBuf>,
+    maps: &mut Sourcemaps,
     opts: &Options,
     rojo: &Rojo,
     strict: bool,
 ) -> anyhow::Result<Option<Scope>> {
     let verbose = log::verbose() > 0;
     let dir = luaurc.parent().unwrap_or(Path::new(""));
-    let project = lookup(luaurc);
 
     if project.is_none() {
         if !opts.process_orphans {
@@ -234,21 +253,64 @@ fn build_one(
         }));
     };
 
-    project_scope(luaurc, dir, project, &aliases, rojo, strict)
+    project_scope(luaurc, dir, project, &aliases, maps, rojo, strict)
 }
 
+type Sourcemaps = BTreeMap<PathBuf, anyhow::Result<sourcemap::Node>>;
+
+/// Whether the scope of `luaurc` will ask for the sourcemap of `project`: its aliases parse and
+/// are not empty, and the project parses. A guess made ahead of time; a miss costs one more run.
+fn maps_project(luaurc: &Path, project: &Path) -> bool {
+    let aliases = std::fs::read_to_string(luaurc)
+        .ok()
+        .and_then(|text| luaurc::parse_aliases(&text).ok());
+
+    aliases.is_some_and(|a| !a.is_empty()) && project::read(project).is_ok()
+}
+
+/// One `rojo sourcemap` per project, all running at once (spec 7.2).
+fn sourcemaps(rojo: &Rojo, projects: &[&PathBuf]) -> Sourcemaps {
+    std::thread::scope(|s| {
+        let running: Vec<_> = projects
+            .iter()
+            .map(|p| (*p, s.spawn(|| rojo.sourcemap(p))))
+            .collect();
+
+        running
+            .into_iter()
+            .map(|(p, run)| {
+                let node = run
+                    .join()
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("rojo sourcemap panicked")));
+                (p.clone(), node)
+            })
+            .collect()
+    })
+}
+
+/// Builds every scope, mapping the projects in parallel first; messages still print in scope
+/// order. `strict` says per `.luaurc` whether a scope that cannot be built is an error.
 fn build_with(
     root: &Path,
     luaurcs: &[PathBuf],
     lookup: &dyn Fn(&Path) -> Option<PathBuf>,
     opts: &Options,
     rojo: &Rojo,
-    strict: bool,
+    strict: &dyn Fn(&Path) -> bool,
 ) -> anyhow::Result<ScopeSet> {
+    let plans: Vec<(&PathBuf, Option<PathBuf>)> = luaurcs.iter().map(|l| (l, lookup(l))).collect();
+    let mapped: BTreeSet<&PathBuf> = plans
+        .iter()
+        .filter_map(|(l, p)| p.as_ref().filter(|p| maps_project(l, p)))
+        .collect();
+    let mapped: Vec<&PathBuf> = mapped.into_iter().collect();
+    let mut maps = sourcemaps(rojo, &mapped);
     let mut scopes = Vec::new();
 
-    for luaurc in luaurcs {
-        if let Some(scope) = build_one(luaurc, lookup, opts, rojo, strict)? {
+    for (luaurc, project) in plans {
+        let strict = strict(luaurc);
+
+        if let Some(scope) = build_one(luaurc, project, &mut maps, opts, rojo, strict)? {
             scopes.push(scope);
         }
     }
@@ -280,7 +342,7 @@ impl ScopeSet {
         opts: &Options,
         rojo: &Rojo,
     ) -> ScopeSet {
-        match build_with(root, luaurcs, lookup, opts, rojo, false) {
+        match build_with(root, luaurcs, lookup, opts, rojo, &|_| false) {
             Ok(set) => set,
             Err(_) => unreachable!("a lenient build never fails"),
         }
@@ -295,7 +357,44 @@ impl ScopeSet {
         opts: &Options,
         rojo: &Rojo,
     ) -> anyhow::Result<ScopeSet> {
-        build_with(root, luaurcs, lookup, opts, rojo, true)
+        build_with(root, luaurcs, lookup, opts, rojo, &|_| true)
+    }
+
+    /// A rebuild in watch mode: as [`ScopeSet::build_strict`] for every `.luaurc` that has a scope
+    /// in `previous`, so a scope that worked fails the batch instead of vanishing, and as
+    /// [`ScopeSet::build`] for the rest, which startup already skipped with a warning.
+    pub fn rebuild(
+        root: &Path,
+        luaurcs: &[PathBuf],
+        lookup: &dyn Fn(&Path) -> Option<PathBuf>,
+        opts: &Options,
+        rojo: &Rojo,
+        previous: &ScopeSet,
+    ) -> anyhow::Result<ScopeSet> {
+        let had: BTreeSet<&Path> = previous.scopes.iter().map(|s| s.luaurc.as_path()).collect();
+        build_with(root, luaurcs, lookup, opts, rojo, &|l| had.contains(l))
+    }
+
+    /// Whether `file` goes through the same scopes, with the same tables and the same instance
+    /// path, in both sets, so that rewriting it again would give the same bytes.
+    pub fn same_chain(&self, other: &ScopeSet, file: &Path) -> bool {
+        let mine = self.chain(file);
+        let theirs = other.chain(file);
+
+        self.wax == other.wax
+            && mine.len() == theirs.len()
+            && mine.iter().zip(&theirs).all(|((x, a), (y, b))| {
+                x.luaurc == y.luaurc && x.rules.same_table(&y.rules) && a == b
+            })
+    }
+
+    /// The scopes covering `file` in order, each with the instance path it gives the file.
+    fn chain(&self, file: &Path) -> Vec<(&Scope, Option<&Vec<String>>)> {
+        self.scopes
+            .iter()
+            .filter(|s| s.covers(file))
+            .map(|s| (s, s.files.get(file)))
+            .collect()
     }
 
     pub fn covers(&self, file: &Path) -> bool {
@@ -503,5 +602,57 @@ mod tests {
         let set = ScopeSet::build(t, &luaurcs, &lookup, &opts(false), &rojo(t));
         assert!(set.scopes.is_empty());
         assert!(ScopeSet::build_strict(t, &luaurcs, &lookup, &opts(false), &rojo(t)).is_err());
+    }
+
+    #[test]
+    fn rebuild_is_strict_only_for_scopes_that_were_built() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = tmp.path();
+        write(&t.join("a/.luaurc"), r#"{"aliases": {"x": "./x"}}"#);
+        write(&t.join("b/.luaurc"), r#"{"aliases": {"y": "./y"},}"#);
+        let luaurcs = [t.join("a/.luaurc"), t.join("b/.luaurc")];
+        let o = opts(true);
+
+        let first = ScopeSet::build(t, &luaurcs, &no_project, &o, &rojo(t));
+        assert_eq!(first.scopes.len(), 1);
+
+        // b never parsed: still skipped with a warning
+        let again = ScopeSet::rebuild(t, &luaurcs, &no_project, &o, &rojo(t), &first).unwrap();
+        assert_eq!(again.scopes.len(), 1);
+
+        // a parsed: breaking it is an error naming it
+        write(&t.join("a/.luaurc"), "{");
+        let err = ScopeSet::rebuild(t, &luaurcs, &no_project, &o, &rojo(t), &first)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(&t.join("a/.luaurc").display().to_string()),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn same_chain_compares_tables_and_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = tmp.path();
+        write(&t.join(".luaurc"), r#"{"aliases": {"a": "./a"}}"#);
+        write(&t.join("src/.luaurc"), r#"{"aliases": {"b": "./b"}}"#);
+        let mut luaurcs = discover_all(t, None);
+        order(&mut luaurcs);
+        let o = opts(true);
+        let file = t.join("src/x.luau");
+        let other = t.join("y.luau");
+
+        let before = ScopeSet::build(t, &luaurcs, &no_project, &o, &rojo(t));
+        let same = ScopeSet::build(t, &luaurcs, &no_project, &o, &rojo(t));
+        assert!(before.same_chain(&same, &file));
+
+        write(&t.join("src/.luaurc"), r#"{"aliases": {"b": "./c"}}"#);
+        let after = ScopeSet::build(t, &luaurcs, &no_project, &o, &rojo(t));
+        assert!(!before.same_chain(&after, &file));
+        assert!(before.same_chain(&after, &other));
+
+        let fewer = ScopeSet::build(t, &[t.join(".luaurc")], &no_project, &o, &rojo(t));
+        assert!(!before.same_chain(&fewer, &file));
     }
 }

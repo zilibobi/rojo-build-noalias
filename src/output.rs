@@ -70,7 +70,7 @@ pub fn swap(built: &Path, dest: &Path) -> anyhow::Result<()> {
 const MAX_LINKS: usize = 40;
 
 /// `path` with every symlink at its end followed, even to a target that does not exist yet.
-fn through_links(path: &Path) -> anyhow::Result<PathBuf> {
+pub(crate) fn through_links(path: &Path) -> anyhow::Result<PathBuf> {
     let mut path = path.to_path_buf();
 
     for _ in 0..MAX_LINKS {

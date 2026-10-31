@@ -1,6 +1,6 @@
 use crate::dealias::Replacement;
 use crate::log;
-use crate::scopes::ScopeSet;
+use crate::scopes::{Scope, ScopeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -39,15 +39,21 @@ pub fn logs(
             continue;
         }
 
-        let title = match &scope.project {
-            Some(project) => original(project).display().to_string(),
-            None => format!("{} (orphan)", original(&scope.luaurc).display()),
-        };
-
-        logs.push(ProjectLog { title, rows });
+        logs.push(ProjectLog {
+            title: title(scope, original),
+            rows,
+        });
     }
 
     logs
+}
+
+/// A scope's title: its original project path, or `<.luaurc> (orphan)`.
+pub fn title(scope: &Scope, original: &dyn Fn(&Path) -> PathBuf) -> String {
+    match &scope.project {
+        Some(project) => original(project).display().to_string(),
+        None => format!("{} (orphan)", original(&scope.luaurc).display()),
+    }
 }
 
 /// v1.2.4's startup table (`init.luau:301-339`): one `Processed project:` line per log with rows,

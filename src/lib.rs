@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod convert;
 pub mod dealias;
+pub mod diff;
 pub mod log;
 pub mod luaurc;
 pub mod output;
