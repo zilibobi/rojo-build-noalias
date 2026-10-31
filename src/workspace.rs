@@ -208,6 +208,7 @@ pub fn mirror_mounts(
         raw: &mut raw,
         touched: Vec::new(),
         placeholders: false,
+        skip: &|_| false,
     };
 
     for root in &mounts.roots {
@@ -244,13 +245,15 @@ pub fn mirror_mounts(
 /// [`mirror_mounts`]' rules, recording it in `snapshot` and `raw`, except that a script's raw
 /// bytes never reach the mirror: a missing script is created empty (so a sourcemap sees it) and an
 /// existing one is left as it is, until the caller rewrites it. Returns the paths that were not in
-/// the snapshot before or were written, and every script visited. A missing `rel` mirrors nothing.
+/// the snapshot before or were written, and every script visited. A missing `rel` mirrors nothing,
+/// and neither does any path `skip` names (the output, when it lies under `rel`).
 pub fn mirror_path(
     src: &Path,
     tree: &Path,
     rel: &Path,
     snapshot: &mut Snapshot,
     raw: &mut BTreeMap<PathBuf, Vec<u8>>,
+    skip: &dyn Fn(&Path) -> bool,
 ) -> anyhow::Result<Vec<PathBuf>> {
     let mut mirror = Mirror {
         src,
@@ -259,6 +262,7 @@ pub fn mirror_path(
         raw,
         touched: Vec::new(),
         placeholders: true,
+        skip,
     };
     mirror.path(rel)?;
 
@@ -274,6 +278,8 @@ struct Mirror<'a> {
     touched: Vec<PathBuf>,
     /// scripts are created empty instead of raw (see [`mirror_path`])
     placeholders: bool,
+    /// paths left out, relative to `src`
+    skip: &'a dyn Fn(&Path) -> bool,
 }
 
 impl Mirror<'_> {
@@ -297,6 +303,10 @@ impl Mirror<'_> {
             } else {
                 rel.join(inner)
             };
+
+            if (self.skip)(&rel) {
+                continue;
+            }
 
             let Ok(meta) = entry.metadata() else {
                 continue;

@@ -788,3 +788,26 @@ fn case_only_rename_lands_dealiased_under_the_new_name() {
     w.assert_no_raw_aliases();
     w.assert_matches_fresh_build();
 }
+
+#[test]
+fn a_newly_mounted_root_holding_the_output_leaves_it_out() {
+    let (_g, p) = fixture("normal-build");
+    write(&p.join("extra/x.luau"), "return require(\"@pkg/Promise\")");
+    let w = Watcher::spawn_out(&p, &p.join("extra/out.rbxm"), &[]);
+    assert!(w.wait_built(secs(10)), "{}", w.log());
+    assert!(p.join("extra/out.rbxm").is_file());
+
+    write(
+        &p.join("default.project.json"),
+        r#"{"name": "NormalBuild", "tree": {"$path": "src", "pkg": {"$path": "pkg"}, "extra": {"$path": "extra"}}}"#,
+    );
+    assert!(w.wait_built(secs(10)), "{}", w.log());
+    assert!(w.has(&["extra", "x"]), "{:#?}", w.model()[0].shape());
+    assert!(
+        !w.has(&["extra", "out"]),
+        "the output was built into itself"
+    );
+    assert!(w.count_built(secs(1)) <= 1, "{}", w.log());
+    w.assert_no_raw_aliases();
+    w.assert_matches_fresh_build();
+}

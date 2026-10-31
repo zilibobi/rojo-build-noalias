@@ -352,13 +352,7 @@ impl Pipeline {
     /// Whether `rel` is the output or a `.rbn-*` temp file beside it. An output inside a mount
     /// is never mirrored, so a build never holds the build before it.
     fn is_output(&self, rel: &Path) -> bool {
-        let temp = rel
-            .file_name()
-            .is_some_and(|n| n.to_string_lossy().starts_with(".rbn-"));
-
-        self.output_rels()
-            .iter()
-            .any(|out| out == rel || (temp && out.parent() == rel.parent()))
+        is_output_in(&self.output_rels(), rel)
     }
 
     /// Whether an event on `path` can concern the build: a path the build reads (under a root, a
@@ -689,18 +683,22 @@ impl Pipeline {
         wanted.extend(mounts.luaurcs.iter().cloned());
 
         let tree = self.tree();
+        let outputs = self.output_rels();
+        let skip = |rel: &Path| is_output_in(&outputs, rel);
 
         for rel in wanted {
             if self.snapshot.entries.contains_key(&rel) {
                 continue;
             }
 
+            // a newly mounted root may hold the output
             let touched = workspace::mirror_path(
                 &self.project_dir,
                 &tree,
                 &rel,
                 &mut self.snapshot,
                 &mut self.raw,
+                &skip,
             )?;
 
             for rel in touched {
@@ -745,6 +743,17 @@ impl Pipeline {
 
         report::print(&logs, elapsed);
     }
+}
+
+/// Whether `rel` is one of `outputs` or a `.rbn-*` temp file beside one.
+fn is_output_in(outputs: &[PathBuf], rel: &Path) -> bool {
+    let temp = rel
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy().starts_with(".rbn-"));
+
+    outputs
+        .iter()
+        .any(|out| out == rel || (temp && out.parent() == rel.parent()))
 }
 
 /// Removes the file or directory at `path`; a missing one is fine.
