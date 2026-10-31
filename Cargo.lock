@@ -917,7 +917,7 @@ dependencies = [
 
 [[package]]
 name = "rojo-build-noalias"
-version = "2.0.0-dev"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "assert_cmd",

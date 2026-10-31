@@ -4,11 +4,16 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 jobs:
-  build:
-    name: Build all platforms
-    runs-on: ubuntu-latest
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -16,55 +21,105 @@ jobs:
       - name: Setup rokit
         uses: CompeyDev/setup-rokit@v0.1.2
 
-      - name: Bundle project
-        run: darklua process ./src/init.luau ./rojo-build-noalias.luau
+      - name: Setup Rust
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Test
+        run: cargo test --locked
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - name: windows-aarch64
+            os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+          - name: macos-x86_64
+            os: macos-14
+            target: x86_64-apple-darwin
+          - name: macos-aarch64
+            os: macos-14
+            target: aarch64-apple-darwin
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Install musl tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y musl-tools
+
+      - name: Add target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Extract version
         id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-
-      - name: Build for all platforms
+        shell: bash
         run: |
-          lune build -t linux-x86_64 -o ./linux-x86_64 ./rojo-build-noalias.luau
-          lune build -t linux-aarch64 -o ./linux-aarch64 ./rojo-build-noalias.luau
-          lune build -t windows-x86_64 -o ./windows-x86_64 ./rojo-build-noalias.luau
-          lune build -t windows-aarch64 -o ./windows-aarch64 ./rojo-build-noalias.luau
-          lune build -t macos-x86_64 -o ./macos-x86_64 ./rojo-build-noalias.luau
-          lune build -t macos-aarch64 -o ./macos-aarch64 ./rojo-build-noalias.luau
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Create zip archives
+      - name: Zip (unix)
+        if: runner.os != 'Windows'
         run: |
           mkdir -p archives
+          zip -j "archives/rbn-${{ steps.version.outputs.VERSION }}-${{ matrix.name }}.zip" "target/${{ matrix.target }}/release/rojo-build-noalias"
 
-          # Linux x86_64
-          cp ./linux-x86_64 ./rojo-build-noalias
-          zip archives/rbn-${{ steps.version.outputs.VERSION }}-linux-x86_64.zip rojo-build-noalias
-          rm ./rojo-build-noalias
+      - name: Zip (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force archives | Out-Null
+          Compress-Archive -Path "target/${{ matrix.target }}/release/rojo-build-noalias.exe" -DestinationPath "archives/rbn-${{ steps.version.outputs.VERSION }}-${{ matrix.name }}.zip"
 
-          # Linux aarch64
-          cp ./linux-aarch64 ./rojo-build-noalias
-          zip archives/rbn-${{ steps.version.outputs.VERSION }}-linux-aarch64.zip rojo-build-noalias
-          rm ./rojo-build-noalias
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rbn-${{ matrix.name }}
+          path: archives/*.zip
+          if-no-files-found: error
 
-          # Windows x86_64
-          cp ./windows-x86_64.exe ./rojo-build-noalias.exe
-          zip archives/rbn-${{ steps.version.outputs.VERSION }}-windows-x86_64.zip rojo-build-noalias.exe
-          rm ./rojo-build-noalias.exe
+  release:
+    name: Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-          # Windows aarch64
-          cp ./windows-aarch64.exe ./rojo-build-noalias.exe
-          zip archives/rbn-${{ steps.version.outputs.VERSION }}-windows-aarch64.zip rojo-build-noalias.exe
-          rm ./rojo-build-noalias.exe
+      - name: Extract version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
 
-          # macOS x86_64
-          cp ./macos-x86_64 ./rojo-build-noalias
-          zip archives/rbn-${{ steps.version.outputs.VERSION }}-macos-x86_64.zip rojo-build-noalias
-          rm ./rojo-build-noalias
-
-          # macOS aarch64
-          cp ./macos-aarch64 ./rojo-build-noalias
-          zip archives/rbn-${{ steps.version.outputs.VERSION }}-macos-aarch64.zip rojo-build-noalias
-          rm ./rojo-build-noalias
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: archives
+          merge-multiple: true
 
       - name: List archives
         run: ls -la archives/
@@ -76,7 +131,6 @@ jobs:
           CHANGELOG_FILE: none
         with:
           args: |
-            ./rojo-build-noalias.luau
             archives/rbn-${{ steps.version.outputs.VERSION }}-linux-x86_64.zip
             archives/rbn-${{ steps.version.outputs.VERSION }}-linux-aarch64.zip
             archives/rbn-${{ steps.version.outputs.VERSION }}-windows-x86_64.zip
